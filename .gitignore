@@ -11,6 +11,20 @@ build/
 # local env files
 .env*.local
 .env
+.env.*
+!.env.example
+
+# Google OAuth / local secrets
+client_secret*.json
+google_client_secret.json
+google_token.json
+*.pem
+
+# TypeScript incremental cache
+*.tsbuildinfo
+
+# Vercel local project metadata
+.vercel/
 
 # logs
 npm-debug.log*
