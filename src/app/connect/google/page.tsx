@@ -51,11 +51,12 @@ function buildPreviewUrl() {
     prompt: "consent",
     state: "preview-state-replace-with-secure-random-state",
   });
+  const query = params.toString().replace(/\+/g, "%20");
 
   return {
     configured: Boolean(clientId),
     redirectUri,
-    url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+    url: `https://accounts.google.com/o/oauth2/v2/auth?${query}`,
   };
 }
 
