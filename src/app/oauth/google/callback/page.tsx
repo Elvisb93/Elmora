@@ -1,9 +1,12 @@
 import Link from "next/link";
+import { exchangeGoogleOAuthCode } from "../../../../lib/googleOAuth";
 
 export const metadata = {
   title: "Google OAuth Callback — Elmora",
-  description: "Placeholder Google OAuth callback route for Elmora.",
+  description: "Server-side Google OAuth callback route for Elmora.",
 };
+
+export const dynamic = "force-dynamic";
 
 type CallbackPageProps = {
   searchParams: Promise<{
@@ -14,10 +17,102 @@ type CallbackPageProps = {
   }>;
 };
 
+type ExchangeResult =
+  | { status: "idle" }
+  | { status: "missing-config"; missing: string[] }
+  | { status: "success"; hasRefreshToken: boolean; expiresIn?: number; scope?: string }
+  | { status: "failed"; message: string };
+
+const redirectUri = "https://elmora-kappa.vercel.app/oauth/google/callback";
+
+function getServerConfig() {
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID ?? process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  const missing: string[] = [];
+
+  if (!clientId) {
+    missing.push("GOOGLE_OAUTH_CLIENT_ID");
+  }
+
+  if (!clientSecret) {
+    missing.push("GOOGLE_OAUTH_CLIENT_SECRET");
+  }
+
+  return {
+    clientId,
+    clientSecret,
+    missing,
+  };
+}
+
+async function exchangeCodeIfConfigured(code?: string): Promise<ExchangeResult> {
+  if (!code) {
+    return { status: "idle" };
+  }
+
+  const config = getServerConfig();
+  if (config.missing.length > 0 || !config.clientId || !config.clientSecret) {
+    return { status: "missing-config", missing: config.missing };
+  }
+
+  try {
+    const token = await exchangeGoogleOAuthCode({
+      code,
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      redirectUri,
+    });
+
+    return {
+      status: "success",
+      hasRefreshToken: Boolean(token.refresh_token),
+      expiresIn: token.expires_in,
+      scope: token.scope,
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      message: error instanceof Error ? error.message : "Unknown OAuth token exchange error",
+    };
+  }
+}
+
+function ExchangeStatus({ result }: { result: ExchangeResult }) {
+  if (result.status === "missing-config") {
+    return (
+      <div className="notice">
+        Authorization code received, but server token exchange is not configured yet. Missing:{" "}
+        <strong>{result.missing.join(", ")}</strong>.
+      </div>
+    );
+  }
+
+  if (result.status === "success") {
+    return (
+      <div className="notice">
+        Google token exchange succeeded server-side. Access token was received, refresh token:{" "}
+        <strong>{result.hasRefreshToken ? "present" : "not returned"}</strong>
+        {result.expiresIn ? `, expires in ${result.expiresIn} seconds` : ""}.
+      </div>
+    );
+  }
+
+  if (result.status === "failed") {
+    return (
+      <div className="notice">
+        Google token exchange failed: <strong>{result.message}</strong>
+      </div>
+    );
+  }
+
+  return <div className="notice">No authorization code was provided.</div>;
+}
+
 export default async function GoogleCallbackPage({ searchParams }: CallbackPageProps) {
   const params = await searchParams;
   const hasCode = Boolean(params.code);
   const hasError = Boolean(params.error);
+  const exchangeResult = hasError ? { status: "idle" as const } : await exchangeCodeIfConfigured(params.code);
 
   return (
     <main className="container doc-page">
@@ -25,16 +120,16 @@ export default async function GoogleCallbackPage({ searchParams }: CallbackPageP
         <p className="eyebrow">OAuth callback</p>
         <h1>Google connection callback</h1>
         <p>
-          This placeholder route confirms that Elmora can receive Google OAuth redirects at
-          <strong> /oauth/google/callback</strong>. It does not exchange authorization codes or store tokens.
+          Elmora received Google’s OAuth redirect at <strong>/oauth/google/callback</strong>. Token
+          exchange runs only on the server and never exposes the Google client secret to browser code.
         </p>
 
         {hasError ? (
-          <div className="notice">Google returned an OAuth error: <strong>{params.error}</strong></div>
-        ) : hasCode ? (
-          <div className="notice">Authorization code received. Token exchange is intentionally not implemented here.</div>
+          <div className="notice">
+            Google returned an OAuth error: <strong>{params.error}</strong>
+          </div>
         ) : (
-          <div className="notice">No authorization code was provided. This is expected for placeholder testing.</div>
+          <ExchangeStatus result={exchangeResult} />
         )}
 
         <h2>Received query fields</h2>
@@ -46,13 +141,17 @@ export default async function GoogleCallbackPage({ searchParams }: CallbackPageP
         </ul>
 
         <p>
-          When the real Connect Google flow is built, this route should validate state, exchange the code
-          server-side, store tokens securely, and redirect the user to an Elmora onboarding status page.
+          Next production step: validate a signed per-client state value, then store the Google token
+          inside that client’s isolated Hermes home folder instead of displaying token details here.
         </p>
 
         <div className="cta-row">
-          <Link className="button primary" href="/connect/google">Back to Google Connect</Link>
-          <Link className="button" href="/">Return home</Link>
+          <Link className="button primary" href="/connect/google">
+            Back to Google Connect
+          </Link>
+          <Link className="button" href="/">
+            Return home
+          </Link>
         </div>
       </article>
     </main>

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { buildGoogleOAuthUrl } from "../../../lib/googleOAuth";
 
 export const metadata = {
   title: "Connect Google — Elmora",
@@ -42,21 +43,17 @@ function getSiteUrl() {
 function buildPreviewUrl() {
   const clientId = process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ?? defaultGoogleOAuthClientId;
   const redirectUri = `${getSiteUrl()}/oauth/google/callback`;
-  const params = new URLSearchParams({
-    response_type: "code",
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    scope: requestedScopes.map((item) => item.scope).join(" "),
-    access_type: "offline",
-    prompt: "consent",
+  const url = buildGoogleOAuthUrl({
+    clientId,
+    redirectUri,
+    scopes: requestedScopes.map((item) => item.scope),
     state: "preview-state-replace-with-secure-random-state",
   });
-  const query = params.toString().replace(/\+/g, "%20");
 
   return {
     configured: Boolean(clientId),
     redirectUri,
-    url: `https://accounts.google.com/o/oauth2/v2/auth?${query}`,
+    url: url.toString(),
   };
 }
 
