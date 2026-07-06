@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { defaultGoogleOAuthClientId } from "../../../connect/google/page";
 import { exchangeGoogleOAuthCode } from "../../../../lib/googleOAuth";
 
 export const metadata = {
@@ -26,13 +27,12 @@ type ExchangeResult =
 const redirectUri = "https://elmora-kappa.vercel.app/oauth/google/callback";
 
 function getServerConfig() {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID ?? process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID;
+  const clientId =
+    process.env.GOOGLE_OAUTH_CLIENT_ID ??
+    process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ??
+    defaultGoogleOAuthClientId;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   const missing: string[] = [];
-
-  if (!clientId) {
-    missing.push("GOOGLE_OAUTH_CLIENT_ID");
-  }
 
   if (!clientSecret) {
     missing.push("GOOGLE_OAUTH_CLIENT_SECRET");

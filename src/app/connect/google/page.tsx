@@ -29,7 +29,7 @@ const requestedScopes = [
   },
 ];
 
-const defaultGoogleOAuthClientId =
+export const defaultGoogleOAuthClientId =
   "582633394629-vmksatd8h7n0u1o4h0ub6el9eof5h0v5.apps.googleusercontent.com";
 
 function getSiteUrl() {
