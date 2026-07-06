@@ -252,6 +252,13 @@ h3 { font-size: 22px; }
   font-size: 13px;
 }
 
+.inline-code {
+  overflow-wrap: anywhere;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 .site-footer {
   border-top: 1px solid var(--line);
   color: var(--muted);
