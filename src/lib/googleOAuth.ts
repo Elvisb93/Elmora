@@ -21,6 +21,35 @@ export type GoogleOAuthTokenResponse = {
   id_token?: string;
 };
 
+export type GoogleAuthorizedUserToken = {
+  type: "authorized_user";
+  client_id: string;
+  client_secret: string;
+  refresh_token: string;
+  token_uri: "https://oauth2.googleapis.com/token";
+  token?: string;
+  expiry?: string;
+  scopes?: string[];
+};
+
+export type BuildGoogleAuthorizedUserTokenOptions = {
+  token: GoogleOAuthTokenResponse;
+  clientId: string;
+  clientSecret: string;
+  now?: Date;
+};
+
+export type PersistGoogleOAuthTokenOptions = {
+  clientRuntimeId: string;
+  tokenFile: GoogleAuthorizedUserToken;
+  storageWebhookUrl?: string;
+  storageWebhookSecret?: string;
+};
+
+export type PersistGoogleOAuthTokenResult =
+  | { status: "stored" }
+  | { status: "skipped"; reason: string };
+
 type GoogleOAuthErrorResponse = {
   error?: string;
   error_description?: string;
@@ -67,4 +96,65 @@ export async function exchangeGoogleOAuthCode(
   }
 
   return payload;
+}
+
+export function buildGoogleAuthorizedUserToken({
+  token,
+  clientId,
+  clientSecret,
+  now = new Date(),
+}: BuildGoogleAuthorizedUserTokenOptions): GoogleAuthorizedUserToken {
+  if (!token.refresh_token) {
+    throw new Error("Google token response did not include a refresh token");
+  }
+
+  const tokenFile: GoogleAuthorizedUserToken = {
+    type: "authorized_user",
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: token.refresh_token,
+    token_uri: "https://oauth2.googleapis.com/token",
+  };
+
+  if (token.access_token) {
+    tokenFile.token = token.access_token;
+  }
+
+  if (token.expires_in) {
+    tokenFile.expiry = new Date(now.getTime() + token.expires_in * 1000).toISOString();
+  }
+
+  if (token.scope) {
+    tokenFile.scopes = token.scope.split(/\s+/).filter(Boolean);
+  }
+
+  return tokenFile;
+}
+
+export async function persistGoogleOAuthToken(
+  { clientRuntimeId, storageWebhookUrl, storageWebhookSecret, tokenFile }: PersistGoogleOAuthTokenOptions,
+  fetchImpl: typeof fetch = fetch,
+): Promise<PersistGoogleOAuthTokenResult> {
+  if (!storageWebhookUrl) {
+    return { status: "skipped", reason: "No token storage webhook configured" };
+  }
+
+  const response = await fetchImpl(storageWebhookUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(storageWebhookSecret ? { authorization: `Bearer ${storageWebhookSecret}` } : {}),
+    },
+    body: JSON.stringify({
+      clientRuntimeId,
+      filename: "google_token.json",
+      token: tokenFile,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google token storage webhook failed: HTTP ${response.status}`);
+  }
+
+  return { status: "stored" };
 }

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { buildGoogleOAuthUrl, exchangeGoogleOAuthCode } from "../src/lib/googleOAuth.ts";
+import {
+  buildGoogleOAuthUrl,
+  buildGoogleAuthorizedUserToken,
+  exchangeGoogleOAuthCode,
+  persistGoogleOAuthToken,
+} from "../src/lib/googleOAuth.ts";
 
 describe("Google OAuth helpers", () => {
   it("builds an authorization URL with the exact hosted callback and encoded scopes", () => {
@@ -30,8 +35,8 @@ describe("Google OAuth helpers", () => {
       calls.push({ url: String(url), init: init ?? {} });
       return new Response(
         JSON.stringify({
-          access_token: "access-token",
-          refresh_token: "refresh-token",
+          access_token: "test-access-token",
+          refresh_token: "test-refresh-token",
           expires_in: 3600,
           scope: "https://www.googleapis.com/auth/gmail.readonly",
           token_type: "Bearer",
@@ -44,14 +49,14 @@ describe("Google OAuth helpers", () => {
       {
         code: "auth-code",
         clientId: "client-id.apps.googleusercontent.com",
-        clientSecret: "server-only-secret",
+        clientSecret: "server-only-test-secret",
         redirectUri: "https://elmora-kappa.vercel.app/oauth/google/callback",
       },
       fetchImpl,
     );
 
-    assert.equal(token.access_token, "access-token");
-    assert.equal(token.refresh_token, "refresh-token");
+    assert.equal(token.access_token, "test-access-token");
+    assert.equal(token.refresh_token, "test-refresh-token");
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "https://oauth2.googleapis.com/token");
     assert.equal(calls[0].init.method, "POST");
@@ -60,7 +65,7 @@ describe("Google OAuth helpers", () => {
     const body = new URLSearchParams(String(calls[0].init.body));
     assert.equal(body.get("code"), "auth-code");
     assert.equal(body.get("client_id"), "client-id.apps.googleusercontent.com");
-    assert.equal(body.get("client_secret"), "server-only-secret");
+    assert.equal(body.get("client_secret"), "server-only-test-secret");
     assert.equal(body.get("redirect_uri"), "https://elmora-kappa.vercel.app/oauth/google/callback");
     assert.equal(body.get("grant_type"), "authorization_code");
   });
@@ -78,12 +83,104 @@ describe("Google OAuth helpers", () => {
           {
             code: "bad-code",
             clientId: "client-id.apps.googleusercontent.com",
-            clientSecret: "server-only-secret",
+            clientSecret: "server-only-test-secret",
             redirectUri: "https://elmora-kappa.vercel.app/oauth/google/callback",
           },
           fetchImpl,
         ),
       /Google token exchange failed: invalid_grant — Bad code/,
     );
+  });
+
+  it("builds a Hermes-compatible authorized_user google_token.json payload", () => {
+    const tokenFile = buildGoogleAuthorizedUserToken({
+      token: {
+        access_token: "test-access-token",
+        refresh_token: "test-refresh-token",
+        expires_in: 3600,
+        scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.events",
+        token_type: "Bearer",
+      },
+      clientId: "client-id.apps.googleusercontent.com",
+      clientSecret: "server-only-test-secret",
+      now: new Date("2026-07-06T12:00:00.000Z"),
+    });
+
+    assert.deepEqual(tokenFile, {
+      type: "authorized_user",
+      client_id: "client-id.apps.googleusercontent.com",
+      client_secret: "server-only-test-secret",
+      refresh_token: "test-refresh-token",
+      token_uri: "https://oauth2.googleapis.com/token",
+      token: "test-access-token",
+      expiry: "2026-07-06T13:00:00.000Z",
+      scopes: ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/calendar.events"],
+    });
+  });
+
+  it("posts a token payload to the configured client-runtime webhook", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const result = await persistGoogleOAuthToken(
+      {
+        clientRuntimeId: "elmora-demo",
+        storageWebhookUrl: "https://runtime.example.com/oauth/google/token",
+        storageWebhookSecret: "shared-webhook-secret",
+        tokenFile: {
+          type: "authorized_user",
+          client_id: "client-id.apps.googleusercontent.com",
+          client_secret: "server-only-test-secret",
+          refresh_token: "test-refresh-token",
+          token_uri: "https://oauth2.googleapis.com/token",
+          token: "test-access-token",
+          expiry: "2026-07-06T13:00:00.000Z",
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+        },
+      },
+      fetchImpl,
+    );
+
+    assert.deepEqual(result, { status: "stored" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://runtime.example.com/oauth/google/token");
+    assert.equal(calls[0].init.method, "POST");
+    assert.equal(calls[0].init.headers?.["content-type" as keyof HeadersInit], "application/json");
+    assert.equal(calls[0].init.headers?.["authorization" as keyof HeadersInit], "Bearer shared-webhook-secret");
+    assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
+      clientRuntimeId: "elmora-demo",
+      filename: "google_token.json",
+      token: {
+        type: "authorized_user",
+        client_id: "client-id.apps.googleusercontent.com",
+        client_secret: "server-only-test-secret",
+        refresh_token: "test-refresh-token",
+        token_uri: "https://oauth2.googleapis.com/token",
+        token: "test-access-token",
+        expiry: "2026-07-06T13:00:00.000Z",
+        scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      },
+    });
+  });
+
+  it("skips token persistence when no storage webhook is configured", async () => {
+    const result = await persistGoogleOAuthToken({
+      clientRuntimeId: "elmora-demo",
+      tokenFile: {
+        type: "authorized_user",
+        client_id: "client-id.apps.googleusercontent.com",
+        client_secret: "server-only-test-secret",
+        refresh_token: "test-refresh-token",
+        token_uri: "https://oauth2.googleapis.com/token",
+      },
+    });
+
+    assert.deepEqual(result, { status: "skipped", reason: "No token storage webhook configured" });
   });
 });

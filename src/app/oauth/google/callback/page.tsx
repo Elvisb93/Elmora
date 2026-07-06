@@ -1,6 +1,10 @@
 import Link from "next/link";
 import { defaultGoogleOAuthClientId } from "../../../connect/google/page";
-import { exchangeGoogleOAuthCode } from "../../../../lib/googleOAuth";
+import {
+  buildGoogleAuthorizedUserToken,
+  exchangeGoogleOAuthCode,
+  persistGoogleOAuthToken,
+} from "../../../../lib/googleOAuth";
 
 export const metadata = {
   title: "Google OAuth Callback — Elmora",
@@ -21,7 +25,14 @@ type CallbackPageProps = {
 type ExchangeResult =
   | { status: "idle" }
   | { status: "missing-config"; missing: string[] }
-  | { status: "success"; hasRefreshToken: boolean; expiresIn?: number; scope?: string }
+  | {
+      status: "success";
+      hasRefreshToken: boolean;
+      expiresIn?: number;
+      scope?: string;
+      storage: "stored" | "skipped";
+      storageDetail?: string;
+    }
   | { status: "failed"; message: string };
 
 const redirectUri = "https://elmora-kappa.vercel.app/oauth/google/callback";
@@ -41,6 +52,9 @@ function getServerConfig() {
   return {
     clientId,
     clientSecret,
+    clientRuntimeId: process.env.ELMORA_CLIENT_RUNTIME_ID ?? "elmora-demo",
+    storageWebhookUrl: process.env.ELMORA_TOKEN_WEBHOOK_URL,
+    storageWebhookSecret: process.env.ELMORA_TOKEN_WEBHOOK_SECRET,
     missing,
   };
 }
@@ -62,12 +76,25 @@ async function exchangeCodeIfConfigured(code?: string): Promise<ExchangeResult> 
       clientSecret: config.clientSecret,
       redirectUri,
     });
+    const tokenFile = buildGoogleAuthorizedUserToken({
+      token,
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+    });
+    const storage = await persistGoogleOAuthToken({
+      clientRuntimeId: config.clientRuntimeId,
+      storageWebhookUrl: config.storageWebhookUrl,
+      storageWebhookSecret: config.storageWebhookSecret,
+      tokenFile,
+    });
 
     return {
       status: "success",
       hasRefreshToken: Boolean(token.refresh_token),
       expiresIn: token.expires_in,
       scope: token.scope,
+      storage: storage.status,
+      storageDetail: storage.status === "skipped" ? storage.reason : undefined,
     };
   } catch (error) {
     return {
@@ -90,9 +117,11 @@ function ExchangeStatus({ result }: { result: ExchangeResult }) {
   if (result.status === "success") {
     return (
       <div className="notice">
-        Google token exchange succeeded server-side. Access token was received, refresh token:{" "}
+        Google token exchange succeeded server-side. Refresh token:{" "}
         <strong>{result.hasRefreshToken ? "present" : "not returned"}</strong>
-        {result.expiresIn ? `, expires in ${result.expiresIn} seconds` : ""}.
+        {result.expiresIn ? `, access token expires in ${result.expiresIn} seconds` : ""}. Token storage:{" "}
+        <strong>{result.storage}</strong>
+        {result.storageDetail ? ` (${result.storageDetail})` : ""}.
       </div>
     );
   }
@@ -141,8 +170,8 @@ export default async function GoogleCallbackPage({ searchParams }: CallbackPageP
         </ul>
 
         <p>
-          Next production step: validate a signed per-client state value, then store the Google token
-          inside that client’s isolated Hermes home folder instead of displaying token details here.
+          Next production step: configure a token-storage webhook on the client runtime so this callback
+          can write <strong>google_token.json</strong> into that client’s isolated Hermes home folder.
         </p>
 
         <div className="cta-row">

@@ -44,4 +44,14 @@ Server-only env var for the callback token exchange:
 GOOGLE_OAUTH_CLIENT_SECRET=your-google-client-secret
 ```
 
-The demo callback has the public Google OAuth client ID configured in code and can exchange an authorization code server-side when the secret variable is configured. Durable per-client token storage is the next integration step. Do not put Google client secrets or refresh tokens in public `NEXT_PUBLIC_*` variables.
+The demo callback has the public Google OAuth client ID configured in code and can exchange an authorization code server-side when the secret variable is configured.
+
+Optional server-only env vars for writing `google_token.json` into a client runtime via a storage webhook:
+
+```bash
+ELMORA_CLIENT_RUNTIME_ID=elmora-demo
+ELMORA_TOKEN_WEBHOOK_URL=https://your-client-runtime.example.com/oauth/google/token
+ELMORA_TOKEN_WEBHOOK_SECRET=shared-webhook-secret
+```
+
+If no token webhook is configured, a successful OAuth exchange is proved and the token is discarded. Do not put Google client secrets, refresh tokens, or webhook secrets in public `NEXT_PUBLIC_*` variables.
