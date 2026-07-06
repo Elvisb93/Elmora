@@ -28,20 +28,23 @@ const requestedScopes = [
   },
 ];
 
+const defaultGoogleOAuthClientId =
+  "582633394629-vmksatd8h7n0u1o4h0ub6el9eof5h0v5.apps.googleusercontent.com";
+
 function getSiteUrl() {
   return (
     process.env.NEXT_PUBLIC_SITE_URL ??
     process.env.VERCEL_PROJECT_PRODUCTION_URL?.replace(/^/, "https://") ??
-    "https://your-elmora-site.vercel.app"
+    "https://elmora-kappa.vercel.app"
   ).replace(/\/$/, "");
 }
 
 function buildPreviewUrl() {
-  const clientId = process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID;
+  const clientId = process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ?? defaultGoogleOAuthClientId;
   const redirectUri = `${getSiteUrl()}/oauth/google/callback`;
   const params = new URLSearchParams({
     response_type: "code",
-    client_id: clientId ?? "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+    client_id: clientId,
     redirect_uri: redirectUri,
     scope: requestedScopes.map((item) => item.scope).join(" "),
     access_type: "offline",
@@ -108,7 +111,10 @@ export default function GoogleConnectPage() {
         <p className="code-box">{preview.url}</p>
 
         <div className="cta-row">
-          <Link className="button primary" href="/oauth/google/callback?state=preview-state">
+          <a className="button primary" href={preview.url}>
+            Start Google OAuth preview
+          </a>
+          <Link className="button" href="/oauth/google/callback?state=preview-state">
             Preview callback page
           </Link>
           <Link className="button" href="/privacy">

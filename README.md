@@ -7,7 +7,7 @@ A small production-ready Next.js landing page for Elmora, designed for deploymen
 - `/` — landing page
 - `/privacy` — privacy policy
 - `/terms` — terms of service
-- `/connect/google` — placeholder Google OAuth connect screen
+- `/connect/google` — Google OAuth connect preview screen
 - `/oauth/google/callback` — placeholder OAuth callback screen
 
 ## Local development
@@ -29,11 +29,13 @@ Import this repository into Vercel and deploy with the default Next.js settings.
 
 No Google client secret is stored in this repo. When implementing the real OAuth flow, store secrets only in Vercel environment variables and perform token exchange server-side.
 
-Optional public env vars for UI-only placeholder behavior:
+Optional public env vars for UI-only preview behavior:
 
 ```bash
 NEXT_PUBLIC_SITE_URL=https://your-elmora-site.vercel.app
 NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
 ```
+
+The public Google OAuth client ID can safely appear in browser code. The Google OAuth client secret must never be committed or exposed to the browser.
 
 The real OAuth connector still needs a server-side callback/token exchange service. Do not put Google client secrets or refresh tokens in public `NEXT_PUBLIC_*` variables.
