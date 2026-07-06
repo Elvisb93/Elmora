@@ -5,6 +5,7 @@ import {
   exchangeGoogleOAuthCode,
   persistGoogleOAuthToken,
 } from "../../../../lib/googleOAuth";
+import { parseRuntimeAllowlist, verifyOAuthState } from "../../../../lib/oauthState";
 
 export const metadata = {
   title: "Google OAuth Callback — Elmora",
@@ -25,15 +26,16 @@ type CallbackPageProps = {
 type ExchangeResult =
   | { status: "idle" }
   | { status: "missing-config"; missing: string[] }
+  | { status: "failed"; message: string }
   | {
       status: "success";
+      runtimeId: string;
       hasRefreshToken: boolean;
       expiresIn?: number;
       scope?: string;
       storage: "stored" | "skipped";
       storageDetail?: string;
-    }
-  | { status: "failed"; message: string };
+    };
 
 const redirectUri = "https://elmora-kappa.vercel.app/oauth/google/callback";
 
@@ -43,33 +45,61 @@ function getServerConfig() {
     process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ??
     defaultGoogleOAuthClientId;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  const stateSigningSecret = process.env.ELMORA_STATE_SIGNING_SECRET;
+  const allowedRuntimeIds = parseRuntimeAllowlist(process.env.ELMORA_ALLOWED_RUNTIME_IDS);
+  const storageWebhookUrl = process.env.ELMORA_TOKEN_WEBHOOK_URL;
+  const storageWebhookSecret = process.env.ELMORA_TOKEN_WEBHOOK_SECRET;
   const missing: string[] = [];
 
   if (!clientSecret) {
     missing.push("GOOGLE_OAUTH_CLIENT_SECRET");
   }
 
+  if (!stateSigningSecret) {
+    missing.push("ELMORA_STATE_SIGNING_SECRET");
+  }
+
+  if (allowedRuntimeIds.length === 0) {
+    missing.push("ELMORA_ALLOWED_RUNTIME_IDS");
+  }
+
   return {
     clientId,
     clientSecret,
-    clientRuntimeId: process.env.ELMORA_CLIENT_RUNTIME_ID ?? "elmora-demo",
-    storageWebhookUrl: process.env.ELMORA_TOKEN_WEBHOOK_URL,
-    storageWebhookSecret: process.env.ELMORA_TOKEN_WEBHOOK_SECRET,
+    stateSigningSecret,
+    allowedRuntimeIds,
+    storageWebhookUrl,
+    storageWebhookSecret,
     missing,
   };
 }
 
-async function exchangeCodeIfConfigured(code?: string): Promise<ExchangeResult> {
+async function exchangeCodeIfConfigured(code?: string, state?: string): Promise<ExchangeResult> {
   if (!code) {
     return { status: "idle" };
   }
 
+  if (!state) {
+    return { status: "failed", message: "Missing OAuth state; cannot route token to a client runtime" };
+  }
+
   const config = getServerConfig();
-  if (config.missing.length > 0 || !config.clientId || !config.clientSecret) {
+  if (
+    config.missing.length > 0 ||
+    !config.clientId ||
+    !config.clientSecret ||
+    !config.stateSigningSecret ||
+    config.allowedRuntimeIds.length === 0
+  ) {
     return { status: "missing-config", missing: config.missing };
   }
 
   try {
+    const verifiedState = verifyOAuthState({
+      state,
+      secret: config.stateSigningSecret,
+      allowedRuntimeIds: config.allowedRuntimeIds,
+    });
     const token = await exchangeGoogleOAuthCode({
       code,
       clientId: config.clientId,
@@ -82,7 +112,7 @@ async function exchangeCodeIfConfigured(code?: string): Promise<ExchangeResult> 
       clientSecret: config.clientSecret,
     });
     const storage = await persistGoogleOAuthToken({
-      clientRuntimeId: config.clientRuntimeId,
+      clientRuntimeId: verifiedState.runtimeId,
       storageWebhookUrl: config.storageWebhookUrl,
       storageWebhookSecret: config.storageWebhookSecret,
       tokenFile,
@@ -90,6 +120,7 @@ async function exchangeCodeIfConfigured(code?: string): Promise<ExchangeResult> 
 
     return {
       status: "success",
+      runtimeId: verifiedState.runtimeId,
       hasRefreshToken: Boolean(token.refresh_token),
       expiresIn: token.expires_in,
       scope: token.scope,
@@ -117,8 +148,8 @@ function ExchangeStatus({ result }: { result: ExchangeResult }) {
   if (result.status === "success") {
     return (
       <div className="notice">
-        Google token exchange succeeded server-side. Refresh token:{" "}
-        <strong>{result.hasRefreshToken ? "present" : "not returned"}</strong>
+        Google token exchange succeeded server-side for runtime <strong>{result.runtimeId}</strong>.
+        Refresh token: <strong>{result.hasRefreshToken ? "present" : "not returned"}</strong>
         {result.expiresIn ? `, access token expires in ${result.expiresIn} seconds` : ""}. Token storage:{" "}
         <strong>{result.storage}</strong>
         {result.storageDetail ? ` (${result.storageDetail})` : ""}.
@@ -141,7 +172,7 @@ export default async function GoogleCallbackPage({ searchParams }: CallbackPageP
   const params = await searchParams;
   const hasCode = Boolean(params.code);
   const hasError = Boolean(params.error);
-  const exchangeResult = hasError ? { status: "idle" as const } : await exchangeCodeIfConfigured(params.code);
+  const exchangeResult = hasError ? { status: "idle" as const } : await exchangeCodeIfConfigured(params.code, params.state);
 
   return (
     <main className="container doc-page">
@@ -150,7 +181,8 @@ export default async function GoogleCallbackPage({ searchParams }: CallbackPageP
         <h1>Google connection callback</h1>
         <p>
           Elmora received Google’s OAuth redirect at <strong>/oauth/google/callback</strong>. Token
-          exchange runs only on the server and never exposes the Google client secret to browser code.
+          exchange runs only on the server, verifies signed runtime state, and never exposes the
+          Google client secret to browser code.
         </p>
 
         {hasError ? (
@@ -170,8 +202,8 @@ export default async function GoogleCallbackPage({ searchParams }: CallbackPageP
         </ul>
 
         <p>
-          Next production step: configure a token-storage webhook on the client runtime so this callback
-          can write <strong>google_token.json</strong> into that client’s isolated Hermes home folder.
+          The verified state chooses the client runtime. The token-storage receiver maps that runtime
+          to a fixed Hermes home folder and rejects arbitrary paths.
         </p>
 
         <div className="cta-row">

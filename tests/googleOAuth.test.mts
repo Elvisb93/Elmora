@@ -7,6 +7,7 @@ import {
   exchangeGoogleOAuthCode,
   persistGoogleOAuthToken,
 } from "../src/lib/googleOAuth.ts";
+import { createOAuthState, verifyOAuthState } from "../src/lib/oauthState.ts";
 
 describe("Google OAuth helpers", () => {
   it("builds an authorization URL with the exact hosted callback and encoded scopes", () => {
@@ -182,5 +183,47 @@ describe("Google OAuth helpers", () => {
     });
 
     assert.deepEqual(result, { status: "skipped", reason: "No token storage webhook configured" });
+  });
+});
+
+describe("signed multi-client OAuth state", () => {
+  const secret = "state-signing-test-secret-with-32-plus-chars";
+  const allowedRuntimeIds = ["elmora-demo", "client-a"];
+  const now = new Date("2026-07-06T12:00:00.000Z");
+
+  it("creates and verifies a signed state for an allowed runtime id", () => {
+    const state = createOAuthState({
+      runtimeId: "client-a",
+      secret,
+      now,
+      nonce: "fixed-nonce",
+      ttlSeconds: 600,
+    });
+
+    const verified = verifyOAuthState({ state, secret, allowedRuntimeIds, now });
+
+    assert.equal(verified.runtimeId, "client-a");
+    assert.equal(verified.nonce, "fixed-nonce");
+    assert.equal(verified.expiresAt, "2026-07-06T12:10:00.000Z");
+  });
+
+  it("rejects tampered state", () => {
+    const state = createOAuthState({ runtimeId: "client-a", secret, now, nonce: "fixed-nonce" });
+    const tampered = state.replace(/.$/, state.endsWith("a") ? "b" : "a");
+
+    assert.throws(() => verifyOAuthState({ state: tampered, secret, allowedRuntimeIds, now }), /Invalid OAuth state signature/);
+  });
+
+  it("rejects expired state", () => {
+    const state = createOAuthState({ runtimeId: "client-a", secret, now, nonce: "fixed-nonce", ttlSeconds: 60 });
+    const later = new Date("2026-07-06T12:02:00.000Z");
+
+    assert.throws(() => verifyOAuthState({ state, secret, allowedRuntimeIds, now: later }), /OAuth state expired/);
+  });
+
+  it("rejects runtime IDs that are not in the allowlist", () => {
+    const state = createOAuthState({ runtimeId: "client-b", secret, now, nonce: "fixed-nonce" });
+
+    assert.throws(() => verifyOAuthState({ state, secret, allowedRuntimeIds, now }), /OAuth runtime is not allowed/);
   });
 });
