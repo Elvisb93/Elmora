@@ -6,12 +6,12 @@ export const metadata: Metadata = {
   title: "Elmora — Managed AI workers for operations",
   description:
     "Elmora provides managed AI workers for inbox, booking, and back-office operations.",
-  metadataBase: new URL("https://elmora.vercel.app"),
+  metadataBase: new URL("https://elmora-kappa.vercel.app"),
   openGraph: {
     title: "Elmora — Managed AI workers for operations",
     description:
       "Managed AI workers for inbox, booking, and back-office operations.",
-    url: "https://elmora.vercel.app",
+    url: "https://elmora-kappa.vercel.app",
     siteName: "Elmora",
     type: "website",
   },
