@@ -49,11 +49,6 @@ const requestedScopes = [
     reason: "Read, create, update, and manage Google Tasks.",
   },
   {
-    label: "Keep",
-    scope: "https://www.googleapis.com/auth/keep",
-    reason: "Read, create, and manage Google Keep notes where the API is available.",
-  },
-  {
     label: "Contacts",
     scope: "https://www.googleapis.com/auth/contacts",
     reason: "Read and manage Google Contacts for client communications.",
@@ -136,9 +131,10 @@ export default async function GoogleConnectPage({ searchParams }: GoogleConnectP
         <h1>Connect Google to Elmora</h1>
         <p>
           Elmora uses Google OAuth so clients can connect Gmail, Calendar, Drive, Docs,
-          Sheets, Slides, Tasks, Keep, and Contacts through Google’s own consent screen.
+          Sheets, Slides, Tasks, and Contacts through Google’s own consent screen.
           Clients never share their password, and token exchange happens server-side before
-          being routed to the correct isolated client runtime.
+          being routed to the correct isolated client runtime. Google Keep is handled separately
+          because its documented scope is rejected by normal user-consent OAuth for this test flow.
         </p>
 
         <div className="notice">

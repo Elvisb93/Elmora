@@ -52,7 +52,7 @@ The Connect page signs the selected `runtime` into the OAuth `state` value. The 
 
 ## Requested Google Workspace scopes
 
-Elmora currently requests a broad Workspace worker profile:
+Elmora currently requests a broad Workspace worker profile through normal user-consent OAuth:
 
 - Gmail manage/send: `https://www.googleapis.com/auth/gmail.modify`, `https://www.googleapis.com/auth/gmail.send`
 - Calendar: `https://www.googleapis.com/auth/calendar`
@@ -61,8 +61,9 @@ Elmora currently requests a broad Workspace worker profile:
 - Sheets: `https://www.googleapis.com/auth/spreadsheets`
 - Slides: `https://www.googleapis.com/auth/presentations`
 - Tasks: `https://www.googleapis.com/auth/tasks`
-- Keep: `https://www.googleapis.com/auth/keep`
 - Contacts: `https://www.googleapis.com/auth/contacts`
+
+Google Keep is intentionally not included in this normal OAuth bundle. Google rejects `https://www.googleapis.com/auth/keep` in the user-consent flow used by this test app; handle Keep later as a separate Workspace/admin/domain-wide-delegation integration rather than blocking Gmail, Drive, Docs, Sheets, Slides, Tasks, Calendar, and Contacts.
 
 Destructive or externally visible actions should still be approval-gated by the agent runtime even when OAuth grants broad permissions.
 
