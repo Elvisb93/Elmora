@@ -50,6 +50,22 @@ ELMORA_ALLOWED_RUNTIME_IDS=elmora-demo,client-a,client-b
 
 The Connect page signs the selected `runtime` into the OAuth `state` value. The callback verifies the state signature, expiry, and runtime allowlist before exchanging the Google code or routing tokens.
 
+## Requested Google Workspace scopes
+
+Elmora currently requests a broad Workspace worker profile:
+
+- Gmail manage/send: `https://www.googleapis.com/auth/gmail.modify`, `https://www.googleapis.com/auth/gmail.send`
+- Calendar: `https://www.googleapis.com/auth/calendar`
+- Drive: `https://www.googleapis.com/auth/drive`
+- Docs: `https://www.googleapis.com/auth/documents`
+- Sheets: `https://www.googleapis.com/auth/spreadsheets`
+- Slides: `https://www.googleapis.com/auth/presentations`
+- Tasks: `https://www.googleapis.com/auth/tasks`
+- Keep: `https://www.googleapis.com/auth/keep`
+- Contacts: `https://www.googleapis.com/auth/contacts`
+
+Destructive or externally visible actions should still be approval-gated by the agent runtime even when OAuth grants broad permissions.
+
 Server-only env vars for writing `google_token.json` into a client runtime via a storage webhook:
 
 ```bash

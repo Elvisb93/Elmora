@@ -9,29 +9,54 @@ export const metadata = {
 
 const requestedScopes = [
   {
-    label: "Gmail read",
-    scope: "https://www.googleapis.com/auth/gmail.readonly",
-    reason: "Read and summarise incoming business enquiries.",
-  },
-  {
-    label: "Gmail workflow labels",
+    label: "Gmail",
     scope: "https://www.googleapis.com/auth/gmail.modify",
-    reason: "Apply status labels such as needs reply, awaiting client, complete, or spam.",
+    reason: "Read, label, archive, and manage Gmail messages without granting permanent-delete power.",
   },
   {
     label: "Gmail send",
     scope: "https://www.googleapis.com/auth/gmail.send",
-    reason: "Send user-approved replies only; no autonomous sending by default.",
+    reason: "Send user-approved replies and outbound emails.",
   },
   {
-    label: "Calendar read",
-    scope: "https://www.googleapis.com/auth/calendar.readonly",
-    reason: "Check availability and booking context for operations workers.",
+    label: "Calendar",
+    scope: "https://www.googleapis.com/auth/calendar",
+    reason: "Read, create, update, and manage calendar events when approved.",
   },
   {
-    label: "Drive read",
-    scope: "https://www.googleapis.com/auth/drive.readonly",
-    reason: "Search, inspect, and download existing Drive files when the user asks.",
+    label: "Drive",
+    scope: "https://www.googleapis.com/auth/drive",
+    reason: "Find, read, create, update, organise, upload, download, and share Drive files.",
+  },
+  {
+    label: "Docs",
+    scope: "https://www.googleapis.com/auth/documents",
+    reason: "Read, create, and edit Google Docs documents.",
+  },
+  {
+    label: "Sheets",
+    scope: "https://www.googleapis.com/auth/spreadsheets",
+    reason: "Read, create, and edit Google Sheets spreadsheets.",
+  },
+  {
+    label: "Slides",
+    scope: "https://www.googleapis.com/auth/presentations",
+    reason: "Read, create, and edit Google Slides presentations.",
+  },
+  {
+    label: "Tasks",
+    scope: "https://www.googleapis.com/auth/tasks",
+    reason: "Read, create, update, and manage Google Tasks.",
+  },
+  {
+    label: "Keep",
+    scope: "https://www.googleapis.com/auth/keep",
+    reason: "Read, create, and manage Google Keep notes where the API is available.",
+  },
+  {
+    label: "Contacts",
+    scope: "https://www.googleapis.com/auth/contacts",
+    reason: "Read and manage Google Contacts for client communications.",
   },
 ];
 
@@ -110,9 +135,10 @@ export default async function GoogleConnectPage({ searchParams }: GoogleConnectP
         <p className="eyebrow">Google Workspace connection</p>
         <h1>Connect Google to Elmora</h1>
         <p>
-          Elmora uses Google OAuth so clients can connect Gmail, Calendar, and Drive through
-          Google’s own consent screen. Clients never share their email password, and token exchange
-          happens server-side before being routed to the correct isolated client runtime.
+          Elmora uses Google OAuth so clients can connect Gmail, Calendar, Drive, Docs,
+          Sheets, Slides, Tasks, Keep, and Contacts through Google’s own consent screen.
+          Clients never share their password, and token exchange happens server-side before
+          being routed to the correct isolated client runtime.
         </p>
 
         <div className="notice">
@@ -126,7 +152,11 @@ export default async function GoogleConnectPage({ searchParams }: GoogleConnectP
           )}
         </div>
 
-        <h2>Planned first-client Workspace scopes</h2>
+        <h2>Requested Workspace scopes</h2>
+        <p>
+          This is the broad Workspace worker profile for client agents. Destructive or externally
+          visible actions still require user approval inside the agent workflow.
+        </p>
         <ul>
           {requestedScopes.map((item) => (
             <li key={item.scope}>
