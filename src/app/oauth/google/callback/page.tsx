@@ -1,10 +1,10 @@
 import Link from "next/link";
-import { defaultGoogleOAuthClientId } from "../../../connect/google/page";
 import {
   buildGoogleAuthorizedUserToken,
   exchangeGoogleOAuthCode,
   persistGoogleOAuthToken,
 } from "../../../../lib/googleOAuth";
+import { defaultGoogleOAuthClientId } from "../../../../lib/oauthConnect";
 import { parseRuntimeAllowlist, verifyOAuthState } from "../../../../lib/oauthState";
 
 export const metadata = {
