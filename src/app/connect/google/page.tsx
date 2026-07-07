@@ -28,6 +28,11 @@ const requestedScopes = [
     scope: "https://www.googleapis.com/auth/calendar.readonly",
     reason: "Check availability and booking context for operations workers.",
   },
+  {
+    label: "Drive read",
+    scope: "https://www.googleapis.com/auth/drive.readonly",
+    reason: "Search, inspect, and download existing Drive files when the user asks.",
+  },
 ];
 
 export const defaultGoogleOAuthClientId =
@@ -105,9 +110,9 @@ export default async function GoogleConnectPage({ searchParams }: GoogleConnectP
         <p className="eyebrow">Google Workspace connection</p>
         <h1>Connect Google to Elmora</h1>
         <p>
-          Elmora uses Google OAuth so clients can connect Gmail and Calendar through Google’s own
-          consent screen. Clients never share their email password, and token exchange happens
-          server-side before being routed to the correct isolated client runtime.
+          Elmora uses Google OAuth so clients can connect Gmail, Calendar, and Drive through
+          Google’s own consent screen. Clients never share their email password, and token exchange
+          happens server-side before being routed to the correct isolated client runtime.
         </p>
 
         <div className="notice">
