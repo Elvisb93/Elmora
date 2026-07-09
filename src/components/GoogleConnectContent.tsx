@@ -9,9 +9,40 @@ export function GoogleConnectContent({ view }: { view: GoogleConnectViewModel })
         <h1>{view.heading}</h1>
         <p className="lede connect-lede">{view.intro}</p>
 
+        {view.connectionSession ? (
+          <section className="connect-section session-panel" aria-labelledby="session-title">
+            <h2 id="session-title">Connection request</h2>
+            <dl className="session-details">
+              <div>
+                <dt>Client</dt>
+                <dd>{view.connectionSession.clientName}</dd>
+              </div>
+              <div>
+                <dt>Agent</dt>
+                <dd>{view.connectionSession.agentName}</dd>
+              </div>
+              {view.connectionSession.requestedEmail ? (
+                <div>
+                  <dt>Expected Google account</dt>
+                  <dd>{view.connectionSession.requestedEmail}</dd>
+                </div>
+              ) : null}
+              <div>
+                <dt>Link expires</dt>
+                <dd>{new Date(view.connectionSession.expiresAt).toUTCString()}</dd>
+              </div>
+            </dl>
+          </section>
+        ) : null}
+
         <div className="notice">
           {view.error ? (
             <span>{view.error}</span>
+          ) : view.connectionSession ? (
+            <span>
+              This is a private, one-time connection link. After Google authorisation succeeds, the link expires and
+              can’t be reused.
+            </span>
           ) : view.showDeveloperDetails ? (
             <span>
               Debug link signed for runtime <strong>{view.runtimeId}</strong>. Tokens produced by this flow can only be

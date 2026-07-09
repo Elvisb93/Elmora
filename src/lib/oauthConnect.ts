@@ -106,6 +106,13 @@ export type GoogleConnectViewModel = {
   primaryButtonLabel: string;
   oauthUrl?: string;
   error?: string;
+  connectionSession?: {
+    id: string;
+    agentName: string;
+    clientName: string;
+    requestedEmail?: string;
+    expiresAt: string;
+  };
 };
 
 const defaultRuntimeId = "elmora-demo";

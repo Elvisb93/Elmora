@@ -1,13 +1,15 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export type OAuthStatePayload = {
-  runtimeId: string;
+  runtimeId?: string;
+  connectSessionId?: string;
   nonce: string;
   expiresAt: string;
 };
 
 export type CreateOAuthStateOptions = {
-  runtimeId: string;
+  runtimeId?: string;
+  connectSessionId?: string;
   secret: string;
   now?: Date;
   nonce?: string;
@@ -41,6 +43,12 @@ function assertSafeRuntimeId(runtimeId: string) {
   }
 }
 
+function assertSafeConnectSessionId(connectSessionId: string) {
+  if (!/^ocs_[a-zA-Z0-9_-]{8,80}$/.test(connectSessionId)) {
+    throw new Error("Invalid OAuth connect session id");
+  }
+}
+
 function assertSecret(secret: string) {
   if (secret.length < 32) {
     throw new Error("OAuth state signing secret must be at least 32 characters");
@@ -56,16 +64,29 @@ export function parseRuntimeAllowlist(value?: string) {
 
 export function createOAuthState({
   runtimeId,
+  connectSessionId,
   secret,
   now = new Date(),
   nonce = randomBytes(18).toString("base64url"),
   ttlSeconds = defaultTtlSeconds,
 }: CreateOAuthStateOptions) {
   assertSecret(secret);
-  assertSafeRuntimeId(runtimeId);
+  if (!runtimeId && !connectSessionId) {
+    throw new Error("OAuth state requires a runtime id or connect session id");
+  }
+  if (runtimeId && connectSessionId) {
+    throw new Error("OAuth state cannot contain both runtime id and connect session id");
+  }
+  if (runtimeId) {
+    assertSafeRuntimeId(runtimeId);
+  }
+  if (connectSessionId) {
+    assertSafeConnectSessionId(connectSessionId);
+  }
 
   const payload: OAuthStatePayload = {
-    runtimeId,
+    ...(runtimeId ? { runtimeId } : {}),
+    ...(connectSessionId ? { connectSessionId } : {}),
     nonce,
     expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
   };
@@ -98,10 +119,16 @@ export function verifyOAuthState({ state, secret, allowedRuntimeIds, now = new D
     throw new Error("Invalid OAuth state payload");
   }
 
-  assertSafeRuntimeId(payload.runtimeId);
+  if (payload.runtimeId) {
+    assertSafeRuntimeId(payload.runtimeId);
 
-  if (!allowedRuntimeIds.includes(payload.runtimeId)) {
-    throw new Error("OAuth runtime is not allowed");
+    if (!allowedRuntimeIds.includes(payload.runtimeId)) {
+      throw new Error("OAuth runtime is not allowed");
+    }
+  } else if (payload.connectSessionId) {
+    assertSafeConnectSessionId(payload.connectSessionId);
+  } else {
+    throw new Error("OAuth state route target missing");
   }
 
   if (Number.isNaN(Date.parse(payload.expiresAt)) || new Date(payload.expiresAt).getTime() <= now.getTime()) {

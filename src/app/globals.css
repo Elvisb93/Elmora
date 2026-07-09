@@ -275,7 +275,12 @@ h3 { font-size: 22px; }
   padding: 16px;
 }
 .permission-card strong { display: block; color: var(--text); margin-bottom: 6px; }
-.permission-card span { color: var(--muted); line-height: 1.55; }
+.permission-card span { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.session-panel { border: 1px solid rgba(94, 234, 212, 0.22); border-radius: 18px; padding: 18px; background: rgba(94, 234, 212, 0.05); }
+.session-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; }
+.session-details div { border: 1px solid var(--border); border-radius: 14px; padding: 12px; background: rgba(255, 255, 255, 0.03); }
+.session-details dt { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.session-details dd { margin: 0; color: var(--foreground); font-weight: 700; overflow-wrap: anywhere; }
 .details-box {
   margin-top: 24px;
   border: 1px solid var(--line);
@@ -302,7 +307,7 @@ h3 { font-size: 22px; }
 
 @media (max-width: 840px) {
   .hero { grid-template-columns: 1fr; padding-top: 54px; }
-  .grid-3, .trust-row, .permission-grid { grid-template-columns: 1fr; }
+  .grid-3, .trust-row, .permission-grid, .session-details { grid-template-columns: 1fr; }
   .section-heading { display: block; }
   .nav-links { gap: 12px; font-size: 13px; }
 }
