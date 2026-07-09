@@ -183,7 +183,9 @@ export function resolveGoogleConnectViewModel({
   routeClientSlug,
   searchParams,
 }: ResolveGoogleConnectViewModelOptions): GoogleConnectViewModel {
-  const mode: "client" | "debug" = isDebugMode(searchParams.debug) ? "debug" : "client";
+  const debugRequested = isDebugMode(searchParams.debug);
+  const debugEnabled = env.ELMORA_ENABLE_DEBUG_CONNECT === "1";
+  const mode: "client" | "debug" = debugRequested && debugEnabled ? "debug" : "client";
   const clientSlug = routeClientSlug || searchParams.client;
   const redirectUri = `${getSiteUrl(env)}${googleWorkspaceProvider.callbackPath}`;
   const clientId = env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ?? env.GOOGLE_OAUTH_CLIENT_ID ?? defaultGoogleOAuthClientId;
@@ -214,6 +216,22 @@ export function resolveGoogleConnectViewModel({
       ...baseView,
       configured: false,
       error: runtimeResolution.error,
+    };
+  }
+
+  if (debugRequested && !debugEnabled) {
+    return {
+      ...baseView,
+      configured: false,
+      error: "Debug connect links are disabled. Ask your Elmora agent for a fresh private connection link.",
+    };
+  }
+
+  if (mode !== "debug") {
+    return {
+      ...baseView,
+      configured: false,
+      error: "Ask your Elmora agent for a fresh private connection link. Public client routes do not create OAuth sessions.",
     };
   }
 
