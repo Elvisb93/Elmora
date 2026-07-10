@@ -4,6 +4,7 @@ import {
   connectSessionKey,
   getVercelKvConnectSessionStore,
   type ConnectSessionRecord,
+  type ConnectSessionStore,
 } from "../../../../../lib/connectSessions";
 
 export const runtime = "nodejs";
@@ -13,35 +14,63 @@ type StatusRouteProps = {
   params: Promise<{ sessionId: string }>;
 };
 
-function jsonError(message: string, status = 400) {
-  return NextResponse.json({ error: message }, { status });
+type ConnectSessionStoreFactory = () => Promise<ConnectSessionStore>;
+
+const sessionIdPattern = /^ocs_[A-Za-z0-9_-]{24}$/;
+
+function jsonError(message: string, status: number, allow?: string) {
+  return NextResponse.json(
+    { error: message },
+    { status, ...(allow ? { headers: { Allow: allow } } : {}) },
+  );
 }
 
-export async function GET(request: NextRequest, { params }: StatusRouteProps) {
-  const agent = authorizeAgentConnectRequest({
-    authorization: request.headers.get("authorization"),
-  });
-  if (!agent) {
-    return jsonError("Unauthorized agent connect request", 401);
+export async function handleConnectSessionStatusRequest(
+  request: NextRequest,
+  { params }: StatusRouteProps,
+  getStore: ConnectSessionStoreFactory = getVercelKvConnectSessionStore,
+) {
+  if (request.method !== "GET") {
+    return jsonError("Method not allowed", 405, "GET");
   }
 
-  const { sessionId } = await params;
-  const store = await getVercelKvConnectSessionStore();
-  const session = await store.get<ConnectSessionRecord>(connectSessionKey(sessionId));
-  if (!session) {
-    return jsonError("Connect session not found", 404);
-  }
-  if (session.runtimeId !== agent.runtimeId) {
-    return jsonError("Connect session does not belong to this agent", 403);
+  const sessionId = await params.then((value) => value.sessionId).catch(() => null);
+  if (typeof sessionId !== "string" || !sessionIdPattern.test(sessionId)) {
+    return jsonError("Invalid request", 400);
   }
 
-  return NextResponse.json({
-    sessionId: session.id,
-    provider: session.provider,
-    runtimeId: session.runtimeId,
-    status: session.status,
-    expiresAt: session.expiresAt,
-    usedAt: session.usedAt,
-    connectedEmail: session.connectedEmail,
-  });
+  try {
+    const store = await getStore();
+    const agent = await authorizeAgentConnectRequest({
+      store,
+      authorization: request.headers.get("authorization"),
+    });
+    if (!agent) {
+      return jsonError("Unauthorized", 401);
+    }
+
+    const session = await store.get<ConnectSessionRecord>(connectSessionKey(sessionId));
+    if (!session) {
+      return jsonError("Not found", 404);
+    }
+    if (session.runtimeId !== agent.runtimeId) {
+      return jsonError("Forbidden", 403);
+    }
+
+    return NextResponse.json({
+      sessionId: session.id,
+      provider: session.provider,
+      runtimeId: session.runtimeId,
+      status: session.status,
+      expiresAt: session.expiresAt,
+      usedAt: session.usedAt,
+      connectedEmail: session.connectedEmail,
+    });
+  } catch {
+    return jsonError("Service temporarily unavailable", 503);
+  }
+}
+
+export async function GET(request: NextRequest, props: StatusRouteProps) {
+  return handleConnectSessionStatusRequest(request, props);
 }

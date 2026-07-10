@@ -6,6 +6,7 @@ import {
   resolveGoogleConnectViewModel,
   parseClientRuntimeMap,
 } from "../src/lib/oauthConnect.ts";
+import { verifyOAuthState } from "../src/lib/oauthState.ts";
 
 describe("OAuth connect page view model", () => {
   const baseEnv = {
@@ -62,6 +63,14 @@ describe("OAuth connect page view model", () => {
     assert.equal(view.primaryButtonLabel, "Start Google OAuth for test-agent-2");
     assert.equal(view.showDeveloperDetails, true);
     assert.ok(view.oauthUrl?.includes("accounts.google.com"));
+    const oauthUrl = new URL(view.oauthUrl ?? "https://invalid.example");
+    const state = verifyOAuthState({
+      state: oauthUrl.searchParams.get("state") ?? "",
+      secret: baseEnv.ELMORA_STATE_SIGNING_SECRET,
+      allowedRuntimeIds: ["test-agent-2"],
+    });
+    assert.equal(oauthUrl.searchParams.get("nonce"), state.nonce);
+    assert.match(oauthUrl.searchParams.get("scope") ?? "", /\bopenid\b/);
   });
 
   it("does not enable debug OAuth links without ELMORA_ENABLE_DEBUG_CONNECT", () => {

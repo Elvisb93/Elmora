@@ -3,7 +3,10 @@ import {
   getVercelKvConnectSessionStore,
   resolveGoogleConnectSessionViewModel,
 } from "../../../../lib/connectSessions";
-import { googleWorkspaceProvider } from "../../../../lib/oauthConnect";
+import {
+  googleWorkspaceProvider,
+  type GoogleConnectViewModel,
+} from "../../../../lib/oauthConnect";
 
 export const metadata = {
   title: "Private Google Connection — Elmora",
@@ -16,6 +19,22 @@ type GoogleConnectSessionPageProps = {
   params: Promise<{ token: string }>;
 };
 
+export function createUnavailableGoogleConnectView(): GoogleConnectViewModel {
+  return {
+    provider: googleWorkspaceProvider,
+    mode: "client",
+    configured: false,
+    showDeveloperDetails: false,
+    runtimeId: "pending",
+    redirectUri: "/oauth/google/callback",
+    heading: "Connection link unavailable",
+    eyebrow: "Private Workspace connection",
+    intro: googleWorkspaceProvider.summary,
+    primaryButtonLabel: "Connect Google Workspace",
+    error: "This connection link is unavailable. Ask your Elmora agent for a fresh link.",
+  };
+}
+
 export default async function GoogleConnectSessionPage({ params }: GoogleConnectSessionPageProps) {
   const { token } = await params;
 
@@ -23,26 +42,7 @@ export default async function GoogleConnectSessionPage({ params }: GoogleConnect
     const store = await getVercelKvConnectSessionStore();
     const view = await resolveGoogleConnectSessionViewModel({ store, rawToken: token });
     return <GoogleConnectContent view={view} />;
-  } catch (error) {
-    return (
-      <GoogleConnectContent
-        view={{
-          provider: googleWorkspaceProvider,
-          mode: "client",
-          configured: false,
-          showDeveloperDetails: false,
-          runtimeId: "pending",
-          redirectUri: "/oauth/google/callback",
-          heading: "Connection link unavailable",
-          eyebrow: "Private Workspace connection",
-          intro: googleWorkspaceProvider.summary,
-          primaryButtonLabel: "Connect Google Workspace",
-          error:
-            error instanceof Error
-              ? error.message
-              : "This connection link is unavailable. Ask your Elmora agent for a fresh link.",
-        }}
-      />
-    );
+  } catch {
+    return <GoogleConnectContent view={createUnavailableGoogleConnectView()} />;
   }
 }

@@ -1,4 +1,6 @@
+import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import {
+  assertGoogleTokenStorageConfiguration,
   buildGoogleAuthorizedUserToken,
   exchangeGoogleOAuthCode,
   persistGoogleOAuthToken,
@@ -7,9 +9,12 @@ import {
 import { defaultGoogleOAuthClientId, getSiteUrl, googleWorkspaceProvider } from "./oauthConnect";
 import { parseRuntimeAllowlist, verifyOAuthState } from "./oauthState";
 import {
+  claimConnectSessionForPersistence,
+  completeConnectSessionPersistenceClaim,
+  createConnectSessionClaimId,
+  getAgentRuntime,
   getConnectSessionById,
   getVercelKvConnectSessionStore,
-  markConnectSessionConnected,
   type ConnectSessionStore,
 } from "./connectSessions";
 
@@ -35,17 +40,21 @@ export type HandleGoogleOAuthCallbackOptions = {
   env?: Record<string, string | undefined>;
   store?: ConnectSessionStore;
   fetchImpl?: typeof fetch;
+  idTokenKeyResolver?: JWTVerifyGetKey;
   now?: Date;
 };
 
-type GoogleIdTokenClaims = {
-  iss?: string;
-  aud?: string;
-  exp?: number;
-  email?: string;
-  email_verified?: boolean | string;
-  hd?: string;
-};
+const googleIdTokenKeyResolver = createRemoteJWKSet(
+  new URL("https://www.googleapis.com/oauth2/v3/certs"),
+);
+const googleIdTokenIssuers = ["https://accounts.google.com", "accounts.google.com"];
+const googleIdTokenClockToleranceSeconds = 30;
+const googleIdTokenMaximumAgeSeconds = 10 * 60;
+
+const genericCallbackFailureMessage =
+  "This Google connection could not be completed. Ask your Elmora agent for a fresh link.";
+const receiverAcceptedFinalizationFailureMessage =
+  "The token receiver accepted the Google token, but Elmora could not finalize the connection status. Ask your Elmora agent to reconcile the connection or provide a fresh link.";
 
 function getServerConfig(env: Record<string, string | undefined>) {
   const clientId = env.GOOGLE_OAUTH_CLIENT_ID ?? env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ?? defaultGoogleOAuthClientId;
@@ -53,6 +62,7 @@ function getServerConfig(env: Record<string, string | undefined>) {
   const stateSigningSecret = env.ELMORA_STATE_SIGNING_SECRET;
   const allowedRuntimeIds = parseRuntimeAllowlist(env.ELMORA_ALLOWED_RUNTIME_IDS);
   const storageWebhookUrl = env.ELMORA_TOKEN_WEBHOOK_URL;
+  const storageWebhookKeyId = env.ELMORA_TOKEN_WEBHOOK_KEY_ID;
   const storageWebhookSecret = env.ELMORA_TOKEN_WEBHOOK_SECRET;
   const redirectUri = `${getSiteUrl(env)}${googleWorkspaceProvider.callbackPath}`;
   const missing: string[] = [];
@@ -63,9 +73,6 @@ function getServerConfig(env: Record<string, string | undefined>) {
   if (!stateSigningSecret) {
     missing.push("ELMORA_STATE_SIGNING_SECRET");
   }
-  if (allowedRuntimeIds.length === 0) {
-    missing.push("ELMORA_ALLOWED_RUNTIME_IDS");
-  }
 
   return {
     clientId,
@@ -73,80 +80,143 @@ function getServerConfig(env: Record<string, string | undefined>) {
     stateSigningSecret,
     allowedRuntimeIds,
     storageWebhookUrl,
+    storageWebhookKeyId,
     storageWebhookSecret,
     redirectUri,
     missing,
   };
 }
 
-function base64UrlDecodeJson<T>(value: string): T {
-  return JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as T;
+function canonicalGoogleEmail(value: unknown) {
+  if (
+    typeof value !== "string" ||
+    value.length < 3 ||
+    value.length > 320 ||
+    value !== value.trim() ||
+    /[\u0000-\u0020\u007f]/.test(value)
+  ) {
+    return null;
+  }
+  const parts = value.split("@");
+  if (parts.length !== 2) {
+    return null;
+  }
+  const [localPart, rawDomain] = parts;
+  const domain = rawDomain.toLowerCase();
+  if (
+    !localPart ||
+    localPart.length > 64 ||
+    !domain ||
+    domain.length > 253 ||
+    !domain.includes(".") ||
+    domain.split(".").some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))
+  ) {
+    return null;
+  }
+  return `${localPart.toLowerCase()}@${domain}`;
 }
 
-export function decodeGoogleIdTokenClaims(idToken: string): GoogleIdTokenClaims {
-  const [, payload, extra] = idToken.split(".");
-  if (!payload || extra === undefined) {
-    throw new Error("Google ID token is malformed");
-  }
-  try {
-    return base64UrlDecodeJson<GoogleIdTokenClaims>(payload);
-  } catch {
-    throw new Error("Google ID token payload is malformed");
-  }
+function isSafeOAuthResponseString(value: unknown, maximum = 8192): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximum &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f]/.test(value)
+  );
 }
 
-export function verifyGoogleIdTokenForConnectSession({
+export async function verifyGoogleIdTokenForConnectSession({
   token,
   clientId,
+  expectedNonce,
   requestedEmail,
   allowedDomains = [],
+  keyResolver = googleIdTokenKeyResolver,
   now = new Date(),
 }: {
   token: GoogleOAuthTokenResponse;
   clientId: string;
+  expectedNonce: string;
   requestedEmail?: string;
   allowedDomains?: string[];
+  keyResolver?: JWTVerifyGetKey;
   now?: Date;
 }) {
-  if (!token.id_token) {
-    throw new Error("Google did not return an ID token; cannot verify the connected account");
-  }
-
-  const claims = decodeGoogleIdTokenClaims(token.id_token);
-  const issuerAllowed = claims.iss === "https://accounts.google.com" || claims.iss === "accounts.google.com";
-  if (!issuerAllowed) {
-    throw new Error("Google ID token issuer is invalid");
-  }
-  if (claims.aud !== clientId) {
-    throw new Error("Google ID token audience is invalid");
-  }
-  if (typeof claims.exp !== "number" || claims.exp * 1000 <= now.getTime()) {
-    throw new Error("Google ID token is expired");
-  }
-  if (claims.email_verified !== true && claims.email_verified !== "true") {
-    throw new Error("Google account email is not verified");
-  }
-  if (!claims.email) {
-    throw new Error("Google ID token did not include an email address");
-  }
-
-  const email = claims.email.toLowerCase();
-  if (requestedEmail && email !== requestedEmail.toLowerCase()) {
-    throw new Error(`Google account ${claims.email} does not match requested account ${requestedEmail}`);
-  }
-
-  const domain = email.split("@").pop()?.toLowerCase();
-  const hostedDomain = claims.hd?.toLowerCase();
-  const normalizedAllowedDomains = allowedDomains.map((item) => item.toLowerCase());
   if (
-    normalizedAllowedDomains.length > 0 &&
-    !normalizedAllowedDomains.includes(domain ?? "") &&
-    !normalizedAllowedDomains.includes(hostedDomain ?? "")
+    !isSafeOAuthResponseString(token.id_token, 16_384) ||
+    !isSafeOAuthResponseString(token.refresh_token) ||
+    (token.access_token !== undefined && !isSafeOAuthResponseString(token.access_token)) ||
+    (token.scope !== undefined && !isSafeOAuthResponseString(token.scope, 16_384)) ||
+    (token.token_type !== undefined &&
+      (typeof token.token_type !== "string" || token.token_type.toLowerCase() !== "bearer")) ||
+    (token.expires_in !== undefined &&
+      (!Number.isSafeInteger(token.expires_in) || token.expires_in <= 0 || token.expires_in > 86_400))
   ) {
-    throw new Error(`Google account ${claims.email} is not in an allowed Workspace domain`);
+    throw new Error("Google token response is incomplete or invalid");
+  }
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(expectedNonce)) {
+    throw new Error("Google ID token nonce expectation is invalid");
   }
 
-  return claims.email;
+  let payload: JWTPayload;
+  try {
+    ({ payload } = await jwtVerify(token.id_token, keyResolver, {
+      algorithms: ["RS256"],
+      issuer: googleIdTokenIssuers,
+      audience: clientId,
+      requiredClaims: ["exp", "iat", "sub", "email", "email_verified", "nonce"],
+      clockTolerance: googleIdTokenClockToleranceSeconds,
+      maxTokenAge: googleIdTokenMaximumAgeSeconds,
+      currentDate: now,
+    }));
+  } catch {
+    throw new Error("Google ID token verification failed");
+  }
+
+  const nowSeconds = Math.floor(now.getTime() / 1000);
+  if (
+    typeof payload.iat !== "number" ||
+    payload.iat > nowSeconds + googleIdTokenClockToleranceSeconds ||
+    typeof payload.sub !== "string" ||
+    payload.sub.length === 0 ||
+    payload.sub.length > 255 ||
+    /[\u0000-\u0020\u007f]/.test(payload.sub) ||
+    payload.email_verified !== true ||
+    typeof payload.nonce !== "string" ||
+    payload.nonce !== expectedNonce
+  ) {
+    throw new Error("Google ID token identity claims are invalid");
+  }
+
+  const authorizedParty = payload.azp;
+  if (
+    (authorizedParty !== undefined && authorizedParty !== clientId) ||
+    (Array.isArray(payload.aud) && payload.aud.length > 1 && authorizedParty !== clientId)
+  ) {
+    throw new Error("Google ID token authorized party is invalid");
+  }
+
+  const email = canonicalGoogleEmail(payload.email);
+  if (!email) {
+    throw new Error("Google ID token email is invalid");
+  }
+  if (requestedEmail && email !== requestedEmail.toLowerCase()) {
+    throw new Error("Google account does not match the requested account");
+  }
+
+  const emailDomain = email.slice(email.lastIndexOf("@") + 1);
+  if (payload.hd !== undefined) {
+    if (typeof payload.hd !== "string" || payload.hd.toLowerCase() !== emailDomain) {
+      throw new Error("Google hosted domain is inconsistent with the account email");
+    }
+  }
+  const normalizedAllowedDomains = allowedDomains.map((item) => item.toLowerCase());
+  if (normalizedAllowedDomains.length > 0 && !normalizedAllowedDomains.includes(emailDomain)) {
+    throw new Error("Google account is outside the allowed domain policy");
+  }
+
+  return email;
 }
 
 export async function handleGoogleOAuthCallback({
@@ -155,6 +225,7 @@ export async function handleGoogleOAuthCallback({
   env = process.env,
   store,
   fetchImpl = fetch,
+  idTokenKeyResolver = googleIdTokenKeyResolver,
   now = new Date(),
 }: HandleGoogleOAuthCallbackOptions): Promise<GoogleOAuthCallbackResult> {
   if (!code) {
@@ -165,9 +236,11 @@ export async function handleGoogleOAuthCallback({
   }
 
   const config = getServerConfig(env);
-  if (!config.stateSigningSecret || config.allowedRuntimeIds.length === 0) {
+  if (!config.stateSigningSecret) {
     return { status: "missing-config", missing: config.missing };
   }
+
+  let receiverAcceptedToken = false;
 
   try {
     const verifiedState = verifyOAuthState({
@@ -181,6 +254,10 @@ export async function handleGoogleOAuthCallback({
     let requestedEmail: string | undefined;
     let allowedDomains: string[] = [];
     let connectSessionId: string | undefined;
+    let expectedAgentRegistryEpoch: number | undefined;
+    let expectedAgentRegistryVersion: string | undefined;
+    let callbackClaimId: string | undefined;
+    let connectSessionTokenHash: string | undefined;
     let resolvedStore = store;
 
     if (verifiedState.connectSessionId) {
@@ -196,20 +273,62 @@ export async function handleGoogleOAuthCallback({
       if (session.provider !== "google") {
         throw new Error("Connect session provider mismatch");
       }
-      if (!config.allowedRuntimeIds.includes(session.runtimeId)) {
-        throw new Error("Connect session runtime is not allowed");
-      }
       runtimeId = session.runtimeId;
       requestedEmail = session.requestedEmail;
       allowedDomains = session.allowedDomains ?? [];
       connectSessionId = session.id;
+      expectedAgentRegistryEpoch = session.registryEpoch;
+      expectedAgentRegistryVersion = session.registryVersion;
+      connectSessionTokenHash = session.tokenHash;
+
+      const activeAgent = await getAgentRuntime({ store: resolvedStore, runtimeId: session.runtimeId });
+      if (
+        !activeAgent ||
+        activeAgent.status !== "active" ||
+        activeAgent.registryEpoch !== session.registryEpoch ||
+        activeAgent.registryVersion !== session.registryVersion ||
+        !activeAgent.allowedProviders.includes(session.provider)
+      ) {
+        await claimConnectSessionForPersistence({
+          store: resolvedStore,
+          sessionId: session.id,
+          runtimeId: session.runtimeId,
+          provider: session.provider,
+          expectedAgentRegistryVersion: session.registryVersion,
+          expectedTokenHash: session.tokenHash,
+          claimId: createConnectSessionClaimId(),
+          now,
+        });
+        throw new Error(
+          "Connect session agent was revoked before token persistence was authorized",
+        );
+      }
     }
 
     if (!runtimeId) {
       throw new Error("OAuth state did not resolve a runtime id");
     }
-    if (!config.clientId || !config.clientSecret) {
-      return { status: "missing-config", missing: config.missing };
+    if (
+      !isSafeOAuthResponseString(config.clientId, 512) ||
+      !config.clientId.endsWith(".apps.googleusercontent.com") ||
+      !isSafeOAuthResponseString(config.clientSecret, 4096) ||
+      /\s/.test(config.clientSecret)
+    ) {
+      return { status: "missing-config", missing: ["Google OAuth client configuration"] };
+    }
+    if (connectSessionId) {
+      if (
+        !config.storageWebhookUrl ||
+        !config.storageWebhookKeyId ||
+        !config.storageWebhookSecret
+      ) {
+        return { status: "missing-config", missing: ["managed token receiver"] };
+      }
+      assertGoogleTokenStorageConfiguration({
+        storageWebhookUrl: config.storageWebhookUrl,
+        storageWebhookKeyId: config.storageWebhookKeyId,
+        storageWebhookSecret: config.storageWebhookSecret,
+      });
     }
 
     const token = await exchangeGoogleOAuthCode(
@@ -222,15 +341,15 @@ export async function handleGoogleOAuthCallback({
       fetchImpl,
     );
 
-    const connectedEmail = connectSessionId
-      ? verifyGoogleIdTokenForConnectSession({
-          token,
-          clientId: config.clientId,
-          requestedEmail,
-          allowedDomains,
-          now,
-        })
-      : undefined;
+    const connectedEmail = await verifyGoogleIdTokenForConnectSession({
+      token,
+      clientId: config.clientId,
+      expectedNonce: verifiedState.nonce,
+      requestedEmail,
+      allowedDomains,
+      keyResolver: idTokenKeyResolver,
+      now,
+    });
 
     const tokenFile = buildGoogleAuthorizedUserToken({
       token,
@@ -238,23 +357,88 @@ export async function handleGoogleOAuthCallback({
       clientSecret: config.clientSecret,
       now,
     });
-    const storage = await persistGoogleOAuthToken(
-      {
-        clientRuntimeId: runtimeId,
-        storageWebhookUrl: config.storageWebhookUrl,
-        storageWebhookSecret: config.storageWebhookSecret,
-        tokenFile,
-      },
-      fetchImpl,
-    );
 
-    if (connectSessionId && resolvedStore) {
-      await markConnectSessionConnected({
+    if (connectSessionId) {
+      if (
+        !resolvedStore ||
+        !expectedAgentRegistryEpoch ||
+        !expectedAgentRegistryVersion ||
+        !connectSessionTokenHash
+      ) {
+        throw new Error("Connect session callback authorization is unavailable");
+      }
+      callbackClaimId = createConnectSessionClaimId();
+      const claimedSession = await claimConnectSessionForPersistence({
         store: resolvedStore,
         sessionId: connectSessionId,
+        runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion,
+        expectedTokenHash: connectSessionTokenHash,
+        claimId: callbackClaimId,
+        now,
+      });
+      if (!claimedSession) {
+        throw new Error("Connect session agent was revoked or its authorization changed");
+      }
+
+      const activeAgent = await getAgentRuntime({ store: resolvedStore, runtimeId });
+      if (
+        !activeAgent ||
+        activeAgent.status !== "active" ||
+        activeAgent.registryEpoch !== expectedAgentRegistryEpoch ||
+        activeAgent.registryVersion !== expectedAgentRegistryVersion ||
+        !activeAgent.allowedProviders.includes("google")
+      ) {
+        throw new Error(
+          "Connect session agent was revoked before token persistence was authorized",
+        );
+      }
+    }
+
+    const storage = connectSessionId
+      ? await persistGoogleOAuthToken(
+          {
+            clientRuntimeId: runtimeId,
+            registryEpoch: expectedAgentRegistryEpoch,
+            storageWebhookUrl: config.storageWebhookUrl,
+            storageWebhookKeyId: config.storageWebhookKeyId,
+            storageWebhookSecret: config.storageWebhookSecret,
+            tokenFile,
+            now,
+          },
+          fetchImpl,
+        )
+      : { status: "skipped" as const, reason: "Debug OAuth state has no authoritative registry epoch" };
+
+    if (connectSessionId) {
+      if (storage.status !== "stored") {
+        throw new Error("Connect session token receiver is unavailable");
+      }
+      receiverAcceptedToken = true;
+      if (
+        !resolvedStore ||
+        !expectedAgentRegistryEpoch ||
+        !expectedAgentRegistryVersion ||
+        !callbackClaimId ||
+        !connectSessionTokenHash
+      ) {
+        throw new Error("Connect session callback authorization is unavailable");
+      }
+      const completedSession = await completeConnectSessionPersistenceClaim({
+        store: resolvedStore,
+        sessionId: connectSessionId,
+        runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion,
+        expectedTokenHash: connectSessionTokenHash,
+        claimId: callbackClaimId,
         connectedEmail,
         now,
       });
+      if (!completedSession) {
+        throw new Error("Connect session agent was revoked before token persistence was authorized");
+      }
     }
 
     return {
@@ -268,10 +452,16 @@ export async function handleGoogleOAuthCallback({
       storage: storage.status,
       storageDetail: storage.status === "skipped" ? storage.reason : undefined,
     };
-  } catch (error) {
+  } catch {
+    if (receiverAcceptedToken) {
+      return {
+        status: "failed",
+        message: receiverAcceptedFinalizationFailureMessage,
+      };
+    }
     return {
       status: "failed",
-      message: error instanceof Error ? error.message : "Unknown OAuth token exchange error",
+      message: genericCallbackFailureMessage,
     };
   }
 }

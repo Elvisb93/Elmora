@@ -24,6 +24,8 @@ export type VerifyOAuthStateOptions = {
 };
 
 const defaultTtlSeconds = 10 * 60;
+const maximumTtlSeconds = 60 * 60;
+const oauthNoncePattern = /^[A-Za-z0-9_-]{32,128}$/;
 
 function base64UrlEncode(value: string | Buffer) {
   return Buffer.from(value).toString("base64url");
@@ -62,15 +64,29 @@ export function parseRuntimeAllowlist(value?: string) {
     .filter(Boolean);
 }
 
+export function createOAuthNonce() {
+  return randomBytes(32).toString("base64url");
+}
+
+function assertSafeNonce(nonce: unknown): asserts nonce is string {
+  if (typeof nonce !== "string" || !oauthNoncePattern.test(nonce)) {
+    throw new Error("Invalid OAuth state nonce");
+  }
+}
+
 export function createOAuthState({
   runtimeId,
   connectSessionId,
   secret,
   now = new Date(),
-  nonce = randomBytes(18).toString("base64url"),
+  nonce = createOAuthNonce(),
   ttlSeconds = defaultTtlSeconds,
 }: CreateOAuthStateOptions) {
   assertSecret(secret);
+  assertSafeNonce(nonce);
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > maximumTtlSeconds) {
+    throw new Error("Invalid OAuth state lifetime");
+  }
   if (!runtimeId && !connectSessionId) {
     throw new Error("OAuth state requires a runtime id or connect session id");
   }
@@ -100,13 +116,19 @@ export function verifyOAuthState({ state, secret, allowedRuntimeIds, now = new D
   assertSecret(secret);
   const [encodedPayload, signature, extra] = state.split(".");
 
-  if (!encodedPayload || !signature || extra !== undefined) {
+  if (
+    !encodedPayload ||
+    !signature ||
+    extra !== undefined ||
+    !/^[A-Za-z0-9_-]+$/.test(encodedPayload) ||
+    !/^[A-Za-z0-9_-]{43}$/.test(signature)
+  ) {
     throw new Error("Invalid OAuth state format");
   }
 
   const expectedSignature = signPayload(encodedPayload, secret);
-  const signatureBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expectedSignature);
+  const signatureBuffer = Buffer.from(signature, "ascii");
+  const expectedBuffer = Buffer.from(expectedSignature, "ascii");
 
   if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) {
     throw new Error("Invalid OAuth state signature");
@@ -114,30 +136,51 @@ export function verifyOAuthState({ state, secret, allowedRuntimeIds, now = new D
 
   let payload: OAuthStatePayload;
   try {
-    payload = JSON.parse(base64UrlDecode(encodedPayload)) as OAuthStatePayload;
+    const parsed = JSON.parse(base64UrlDecode(encodedPayload)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not an object");
+    }
+    const record = parsed as Record<string, unknown>;
+    const allowedKeys = new Set(["runtimeId", "connectSessionId", "nonce", "expiresAt"]);
+    if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
+      throw new Error("unknown field");
+    }
+    if (
+      (record.runtimeId !== undefined && typeof record.runtimeId !== "string") ||
+      (record.connectSessionId !== undefined && typeof record.connectSessionId !== "string") ||
+      typeof record.nonce !== "string" ||
+      typeof record.expiresAt !== "string"
+    ) {
+      throw new Error("invalid field type");
+    }
+    payload = record as OAuthStatePayload;
   } catch {
     throw new Error("Invalid OAuth state payload");
   }
 
+  if (Boolean(payload.runtimeId) === Boolean(payload.connectSessionId)) {
+    throw new Error("Invalid OAuth state route target");
+  }
+
   if (payload.runtimeId) {
     assertSafeRuntimeId(payload.runtimeId);
-
     if (!allowedRuntimeIds.includes(payload.runtimeId)) {
       throw new Error("OAuth runtime is not allowed");
     }
   } else if (payload.connectSessionId) {
     assertSafeConnectSessionId(payload.connectSessionId);
-  } else {
-    throw new Error("OAuth state route target missing");
   }
 
-  if (Number.isNaN(Date.parse(payload.expiresAt)) || new Date(payload.expiresAt).getTime() <= now.getTime()) {
+  const expiresAt = Date.parse(payload.expiresAt);
+  if (
+    Number.isNaN(expiresAt) ||
+    new Date(expiresAt).toISOString() !== payload.expiresAt ||
+    expiresAt <= now.getTime() ||
+    expiresAt > now.getTime() + maximumTtlSeconds * 1000
+  ) {
     throw new Error("OAuth state expired");
   }
 
-  if (!payload.nonce) {
-    throw new Error("OAuth state nonce missing");
-  }
-
+  assertSafeNonce(payload.nonce);
   return payload;
 }

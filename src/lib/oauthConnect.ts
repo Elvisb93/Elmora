@@ -1,5 +1,5 @@
 import { buildGoogleOAuthUrl } from "./googleOAuth";
-import { createOAuthState, parseRuntimeAllowlist } from "./oauthState";
+import { createOAuthNonce, createOAuthState, parseRuntimeAllowlist } from "./oauthState";
 
 export const defaultGoogleOAuthClientId =
   "582633394629-vmksatd8h7n0u1o4h0ub6el9eof5h0v5.apps.googleusercontent.com";
@@ -251,15 +251,18 @@ export function resolveGoogleConnectViewModel({
     };
   }
 
+  const nonce = createOAuthNonce();
   const state = createOAuthState({
     runtimeId,
     secret: signingSecret,
+    nonce,
   });
   const oauthUrl = buildGoogleOAuthUrl({
     clientId,
     redirectUri,
-    scopes: googleWorkspaceProvider.scopes.map((item) => item.scope),
+    scopes: ["openid", "email", "profile", ...googleWorkspaceProvider.scopes.map((item) => item.scope)],
     state,
+    nonce,
   }).toString();
 
   return {

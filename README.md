@@ -9,6 +9,8 @@ A small production-ready Next.js landing page for Elmora, designed for deploymen
 - `/terms` — terms of service
 - `/connect/google?runtime=<runtime-id>` — debug-only signed Google OAuth connect screen for a specific client runtime
 - `/connect/google/[token]` — private one-time Google OAuth connect page created for an agent/client request
+- `/api/agent-runtimes` — admin-authenticated API for provisioning an agent in KV
+- `/api/agent-runtimes/[runtimeId]` — admin-authenticated agent revocation endpoint
 - `/api/connect-sessions` — agent-authenticated API for creating one-time connect links
 - `/api/connect-sessions/[sessionId]/status` — agent-authenticated status check for a connect session
 - `/oauth/google/callback` — server-side OAuth callback screen
@@ -48,10 +50,12 @@ Server-only env vars for multi-client-safe OAuth:
 ```bash
 GOOGLE_OAUTH_CLIENT_SECRET=your-google-client-secret
 ELMORA_STATE_SIGNING_SECRET=at-least-32-random-characters
-ELMORA_ALLOWED_RUNTIME_IDS=elmora-demo,client-a,client-b
+ELMORA_AGENT_REGISTRY_ADMIN_SECRET=one-global-platform-admin-secret
 ```
 
-The legacy/debug Connect page signs the selected `runtime` into the OAuth `state` value. The production one-time link flow signs a `connectSessionId` into `state`; the callback then resolves the runtime from Vercel KV session metadata, not from the browser URL.
+Agent names, runtime IDs, provider policy, account policy, and hashed agent bearer tokens are records in Vercel KV. They are not deployment environment variables. `ELMORA_AGENT_REGISTRY_ADMIN_SECRET` is the single global credential used by the trusted Elmora provisioning service to create or revoke those KV records.
+
+The optional legacy/debug Connect page may still use `ELMORA_ALLOWED_RUNTIME_IDS` when `ELMORA_ENABLE_DEBUG_CONNECT=1`. The production one-time link flow does not use that allowlist: it signs a `connectSessionId` into state and resolves the active agent/runtime from KV.
 
 ## Agent-created one-time connect links
 
@@ -61,7 +65,9 @@ Elmora’s preferred no-portal flow is:
 2. The agent calls `POST /api/connect-sessions` with its private bearer secret.
 3. Elmora creates a short-lived Vercel KV session and returns `/connect/google/[token]`.
 4. The client opens that private link, sees the client/agent identity, and authorises Google.
-5. The callback verifies signed state, verifies the Google account email/domain, stores `google_token.json` into the mapped runtime, then marks the session used and deletes the public token lookup.
+5. The callback verifies signed state and the Google account email/domain, atomically claims the pending session, revalidates the active KV registry version immediately before handoff, stores `google_token.json` into the mapped runtime, then atomically marks the session used and deletes the public token lookup.
+
+A receiver persistence error is **not** a connected result. Elmora leaves the claimed session in `processing`, removes it from the public-link path, and does not automatically redeliver a token because a network failure can leave receiver outcome unknown. The agent can inspect the authenticated session status; after expiry it must create a fresh one-time link. The registry/version check narrows the control-plane race immediately before handoff, but the Phase 2 receiver must still reject inactive or unknown local runtimes.
 
 Required Vercel KV / Redis env vars are provided by the Vercel storage integration, typically:
 
@@ -70,34 +76,36 @@ KV_REST_API_URL=...
 KV_REST_API_TOKEN=...
 ```
 
-Agent auth and metadata use server-only env vars:
+Provision an agent once through the admin API:
 
 ```bash
-# Runtime IDs that may receive OAuth tokens.
-ELMORA_ALLOWED_RUNTIME_IDS=client-a
-
-# SHA-256 hashes of the raw secrets agents present as Bearer tokens.
-ELMORA_AGENT_CONNECT_SECRETS=client-a:sha256-hex-of-agent-secret
-
-# Optional richer display + account policy. Keys must match runtime IDs.
-ELMORA_AGENT_RUNTIME_REGISTRY={"client-a":{"agentName":"Acme Inbox Agent","clientName":"Acme Events","allowedProviders":["google"],"requestedEmail":"owner@acme.com","allowedDomains":["acme.com"]}}
+curl -sS -X POST https://elmora-kappa.vercel.app/api/agent-runtimes \
+  -H "authorization: Bearer $ELMORA_REGISTRY_ADMIN_BEARER" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtimeId":"client-a",
+    "agentName":"Acme Inbox Agent",
+    "clientName":"Acme Events",
+    "allowedProviders":["google"],
+    "requestedEmail":"owner@acme.com",
+    "allowedDomains":["acme.com"]
+  }'
 ```
 
-Generate a secret hash locally without printing the secret into the repo:
+The response returns the new `agentConnectSecret` once. Store it inside that agent's isolated runtime. Elmora stores only its SHA-256 hash in KV. Provisioning or revoking another agent changes KV immediately and does not require a Vercel env edit or redeployment.
+
+Revoke an agent with:
 
 ```bash
-python - <<'PY'
-import getpass, hashlib
-secret = getpass.getpass('Agent connect secret: ')
-print(hashlib.sha256(secret.encode()).hexdigest())
-PY
+curl -sS -X DELETE https://elmora-kappa.vercel.app/api/agent-runtimes/client-a \
+  -H "authorization: Bearer $ELMORA_REGISTRY_ADMIN_BEARER"
 ```
 
 Example agent request:
 
 ```bash
 curl -sS -X POST https://elmora-kappa.vercel.app/api/connect-sessions \
-  -H 'authorization: Bearer <agent-bearer-token>' \
+  -H "authorization: Bearer $ELMORA_AGENT_CONNECT_BEARER" \
   -H 'content-type: application/json' \
   -d '{"provider":"google","requestedEmail":"owner@acme.com"}'
 ```
