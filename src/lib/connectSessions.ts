@@ -804,7 +804,7 @@ function assertSafeRuntimeId(runtimeId: string) {
 }
 
 function assertSafeSessionId(sessionId: string) {
-  if (!/^ocs_[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$/.test(sessionId)) {
+  if (!/^ocs_[a-zA-Z0-9_-]{1,96}$/.test(sessionId)) {
     throw new Error("Invalid connect-session session id");
   }
 }

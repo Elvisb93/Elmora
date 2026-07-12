@@ -1,9 +1,11 @@
-import { GoogleConnectContent } from "../../../components/GoogleConnectContent";
+import { GoogleConnectBootstrap } from "../../../components/GoogleConnectBootstrap";
 import { resolveGoogleConnectViewModel } from "../../../lib/oauthConnect";
 
 export const metadata = {
   title: "Connect Google Workspace — Elmora",
   description: "Connect Google Workspace to an Elmora worker through a secure OAuth flow.",
+  referrer: "no-referrer" as const,
+  robots: { index: false, follow: false },
 };
 
 type GoogleConnectPageProps = {
@@ -20,5 +22,5 @@ export default async function GoogleConnectPage({ searchParams }: GoogleConnectP
     searchParams: params,
   });
 
-  return <GoogleConnectContent view={view} />;
+  return <GoogleConnectBootstrap fallbackView={view} />;
 }

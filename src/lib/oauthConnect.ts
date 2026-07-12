@@ -115,6 +115,10 @@ export type GoogleConnectViewModel = {
   };
 };
 
+export type GoogleConnectDisplayViewModel = Omit<GoogleConnectViewModel, "connectionSession"> & {
+  connectionSession?: Omit<NonNullable<GoogleConnectViewModel["connectionSession"]>, "id">;
+};
+
 const defaultRuntimeId = "elmora-demo";
 
 export function parseClientRuntimeMap(value?: string) {

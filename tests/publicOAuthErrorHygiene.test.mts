@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ExchangeStatus, ProviderErrorNotice } from "../src/app/oauth/google/callback/page.tsx";
-import { createUnavailableGoogleConnectView } from "../src/app/connect/google/[token]/page.tsx";
+import { createUnavailableGoogleConnectView } from "../src/components/GoogleConnectBootstrap.tsx";
 import { GoogleConnectContent } from "../src/components/GoogleConnectContent.tsx";
 
 describe("public OAuth page error hygiene", () => {

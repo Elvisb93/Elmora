@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   authorizeAgentRegistryAdminRequest,
+  getAgentRuntime,
   getVercelKvConnectSessionStore,
   revokeAgentRuntime,
   type ConnectSessionStore,
@@ -17,11 +18,8 @@ type ConnectSessionStoreFactory = () => Promise<ConnectSessionStore>;
 
 const runtimeIdPattern = /^[a-z][a-z0-9-]{2,62}$/;
 
-function jsonError(message: string, status: number, allow?: string) {
-  return NextResponse.json(
-    { error: message },
-    { status, ...(allow ? { headers: { Allow: allow } } : {}) },
-  );
+function jsonError(message: string, status: number) {
+  return NextResponse.json({ error: message }, { status });
 }
 
 export async function handleRevokeAgentRuntimeRequest(
@@ -29,22 +27,18 @@ export async function handleRevokeAgentRuntimeRequest(
   { params }: AgentRuntimeRouteProps,
   getStore: ConnectSessionStoreFactory = getVercelKvConnectSessionStore,
 ) {
-  if (request.method !== "DELETE") {
-    return jsonError("Method not allowed", 405, "DELETE");
+  if (
+    !authorizeAgentRegistryAdminRequest({
+      authorization: request.headers["get"]("authorization"),
+      adminSecret: process.env.ELMORA_AGENT_REGISTRY_ADMIN_SECRET,
+    })
+  ) {
+    return jsonError("Unauthorized", 401);
   }
 
   const runtimeId = await params.then((value) => value.runtimeId).catch(() => null);
   if (typeof runtimeId !== "string" || !runtimeIdPattern.test(runtimeId)) {
     return jsonError("Invalid request", 400);
-  }
-
-  if (
-    !authorizeAgentRegistryAdminRequest({
-      authorization: request.headers.get("authorization"),
-      adminSecret: process.env.ELMORA_AGENT_REGISTRY_ADMIN_SECRET,
-    })
-  ) {
-    return jsonError("Unauthorized", 401);
   }
 
   try {
@@ -57,6 +51,51 @@ export async function handleRevokeAgentRuntimeRequest(
   } catch {
     return jsonError("Service temporarily unavailable", 503);
   }
+}
+
+export async function handleGetAgentRuntimeStatusRequest(
+  request: NextRequest,
+  { params }: AgentRuntimeRouteProps,
+  getStore: ConnectSessionStoreFactory = getVercelKvConnectSessionStore,
+) {
+  if (
+    !authorizeAgentRegistryAdminRequest({
+      authorization: request.headers["get"]("authorization"),
+      adminSecret: process.env.ELMORA_AGENT_REGISTRY_ADMIN_SECRET,
+    })
+  ) {
+    return jsonError("Unauthorized", 401);
+  }
+
+  const runtimeId = await params.then((value) => value.runtimeId).catch(() => null);
+  if (typeof runtimeId !== "string" || !runtimeIdPattern.test(runtimeId)) {
+    return jsonError("Invalid request", 400);
+  }
+
+  try {
+    const store = await getStore();
+    const agent = await getAgentRuntime({ store, runtimeId });
+    if (!agent) {
+      return jsonError("Not found", 404);
+    }
+    return NextResponse.json(
+      {
+        runtimeId: agent.runtimeId,
+        status: agent.status,
+        registryEpoch: agent.registryEpoch,
+        allowedProviders: agent.allowedProviders,
+        createdAt: agent.createdAt,
+        updatedAt: agent.updatedAt,
+      },
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
+  } catch {
+    return jsonError("Service temporarily unavailable", 503);
+  }
+}
+
+export async function GET(request: NextRequest, props: AgentRuntimeRouteProps) {
+  return handleGetAgentRuntimeStatusRequest(request, props);
 }
 
 export async function DELETE(request: NextRequest, props: AgentRuntimeRouteProps) {

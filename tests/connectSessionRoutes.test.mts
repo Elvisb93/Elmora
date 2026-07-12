@@ -107,28 +107,6 @@ describe("route helpers enforce HTTP methods", () => {
     }
   });
 
-  it("rejects non-DELETE revoke methods before store access", async () => {
-    await withRegistryAdmin(async () => {
-      for (const method of ["GET", "POST", "PUT", "PATCH"]) {
-        let storeCalls = 0;
-        const request = new NextRequest(`https://elmora.example/api/agent-runtimes/${runtimeId}`, {
-          method,
-          headers: { authorization: `Bearer ${adminSecret}` },
-        });
-        const response = await revokeRegistryRoute.handleRevokeAgentRuntimeRequest(
-          request,
-          { params: Promise.resolve({ runtimeId }) },
-          async () => {
-            storeCalls += 1;
-            return createMemoryConnectSessionStore();
-          },
-        );
-        await assertMethodNotAllowed(response, "DELETE");
-        assert.equal(storeCalls, 0);
-      }
-    });
-  });
-
   it("rejects non-GET status methods before store access", async () => {
     for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
       let storeCalls = 0;
@@ -382,6 +360,10 @@ describe("connect-session create route validation and error hygiene", () => {
       );
       const payload = await response.json();
       assert.equal(response.status, 201);
+      const connectUrl = new URL(payload.connectUrl);
+      assert.equal(connectUrl.pathname, "/connect/google");
+      assert.match(connectUrl.hash, /^#token=ecs_[A-Za-z0-9_-]{43}$/);
+      assert.doesNotMatch(connectUrl.pathname, /ecs_/);
       const actualTtl = new Date(payload.expiresAt).getTime() - before;
       assert.ok(actualTtl >= ttlSeconds * 1000 - 1_000);
       assert.ok(actualTtl <= ttlSeconds * 1000 + 1_000);

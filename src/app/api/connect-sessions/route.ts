@@ -173,7 +173,7 @@ export async function handleCreateConnectSessionRequest(
         provider: created.session.provider,
         runtimeId: created.session.runtimeId,
         expiresAt: created.session.expiresAt,
-        connectUrl: `${siteUrl}/connect/${body.provider}/${created.rawToken}`,
+        connectUrl: `${siteUrl}/connect/${body.provider}#token=${encodeURIComponent(created.rawToken)}`,
       },
       { status: 201 },
     );

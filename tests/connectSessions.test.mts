@@ -11,6 +11,7 @@ import {
   connectSessionKey,
   connectSessionTokenKey,
   createConnectSession,
+  createConnectSessionId,
   createMemoryConnectSessionStore,
   getAgentRuntime,
   getConnectSessionByToken,
@@ -602,6 +603,14 @@ describe("agent registry admin bearer authorization", () => {
 });
 
 describe("KV-backed one-time OAuth connect sessions", () => {
+  it("accepts the complete Base64URL alphabet emitted by the session-id generator", () => {
+    assert.doesNotThrow(() => connectSessionKey(`ocs_-${"a".repeat(23)}`));
+    assert.doesNotThrow(() => connectSessionKey(`ocs__${"a".repeat(23)}`));
+    for (let index = 0; index < 1_000; index += 1) {
+      assert.doesNotThrow(() => connectSessionKey(createConnectSessionId()));
+    }
+  });
+
   it("creates an opaque one-time token without exposing the runtime id in the public URL token", async () => {
     const store = createMemoryConnectSessionStore();
     const now = new Date("2026-07-07T12:00:00.000Z");

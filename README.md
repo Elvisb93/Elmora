@@ -8,10 +8,11 @@ A small production-ready Next.js landing page for Elmora, designed for deploymen
 - `/privacy` — privacy policy
 - `/terms` — terms of service
 - `/connect/google?runtime=<runtime-id>` — debug-only signed Google OAuth connect screen for a specific client runtime
-- `/connect/google/[token]` — private one-time Google OAuth connect page created for an agent/client request
+- `/connect/google#token=<opaque-token>` — private one-time Google OAuth connect page; the fragment is never sent in the HTTP request path
 - `/api/agent-runtimes` — admin-authenticated API for provisioning an agent in KV
-- `/api/agent-runtimes/[runtimeId]` — admin-authenticated agent revocation endpoint
+- `/api/agent-runtimes/[runtimeId]` — admin-authenticated sanitized agent status (`GET`) and revocation (`DELETE`)
 - `/api/connect-sessions` — agent-authenticated API for creating one-time connect links
+- `/api/connect-sessions/resolve` — bounded no-store POST resolver used after the browser clears the private fragment
 - `/api/connect-sessions/[sessionId]/status` — agent-authenticated status check for a connect session
 - `/oauth/google/callback` — server-side OAuth callback screen
 
@@ -63,7 +64,7 @@ Elmora’s preferred no-portal flow is:
 
 1. The client asks their agent to connect Google.
 2. The agent calls `POST /api/connect-sessions` with its private bearer secret.
-3. Elmora creates a short-lived Vercel KV session and returns `/connect/google/[token]`.
+3. Elmora creates a short-lived Vercel KV session and returns `/connect/google#token=<opaque-token>`; the browser clears the fragment before resolving it by POST.
 4. The client opens that private link, sees the client/agent identity, and authorises Google.
 5. The callback verifies signed state and the Google account email/domain, atomically claims the pending session, revalidates the active KV registry version immediately before handoff, stores `google_token.json` into the mapped runtime, then atomically marks the session used and deletes the public token lookup.
 
@@ -94,6 +95,17 @@ curl -sS -X POST https://elmora-kappa.vercel.app/api/agent-runtimes \
 
 The response returns the new `agentConnectSecret` once. Store it inside that agent's isolated runtime. Elmora stores only its SHA-256 hash in KV. Provisioning or revoking another agent changes KV immediately and does not require a Vercel env edit or redeployment.
 
+Inspect one runtime without exposing client identity, bearer hashes, account policy, or registry versions:
+
+```bash
+curl -fsS https://elmora-kappa.vercel.app/api/agent-runtimes/client-a \
+  -H "authorization: Bearer $ELMORA_AGENT_REGISTRY_ADMIN_SECRET"
+```
+
+The response is limited to `runtimeId`, lifecycle `status`, authoritative `registryEpoch`, `allowedProviders`, `createdAt`, and `updatedAt`. This is an operator synchronization signal, not a replacement for container health or local tenant readiness checks.
+
+The runtime-resource module exports only `GET` and `DELETE`. Next.js owns automatic `HEAD`/`OPTIONS` behavior and unsupported-method `405` responses; clients must not depend on a custom JSON body or a custom `Allow` header for those framework-generated responses.
+
 Revoke an agent with:
 
 ```bash
@@ -118,11 +130,11 @@ Response:
   "provider": "google",
   "runtimeId": "client-a",
   "expiresAt": "...",
-  "connectUrl": "https://elmora-kappa.vercel.app/connect/google/ecs_..."
+  "connectUrl": "https://elmora-kappa.vercel.app/connect/google#token=ecs_..."
 }
 ```
 
-The raw `ecs_...` token is shown only once to the agent. KV stores its SHA-256 hash. Once OAuth succeeds, the public token lookup is deleted; old links show an expired/unavailable message.
+The raw `ecs_...` token is shown only once to the agent. It is carried in the URL fragment so Vercel and intermediary HTTP request logs do not receive it. The browser clears the fragment before sending the token in a bounded, same-origin, no-store POST to `/api/connect-sessions/resolve`; that response never reflects the raw token or runtime ID. KV stores only the token's SHA-256 hash. Once OAuth succeeds, the public token lookup is deleted; old links show an expired/unavailable message.
 
 ## Requested Google Workspace scopes
 
@@ -144,8 +156,9 @@ Destructive or externally visible actions should still be approval-gated by the 
 Server-only env vars for writing `google_token.json` into a client runtime via a storage webhook:
 
 ```bash
-ELMORA_TOKEN_WEBHOOK_URL=https://your-client-runtime.example.com/oauth/google/token
-ELMORA_TOKEN_WEBHOOK_SECRET=shared-webhook-secret
+ELMORA_TOKEN_WEBHOOK_URL=https://your-client-runtime.example.com/v1/oauth/google/token
+ELMORA_TOKEN_WEBHOOK_KEY_ID=active-key-id
+ELMORA_TOKEN_WEBHOOK_SECRET=matching-hmac-key-material
 ```
 
-The callback sends the verified `runtimeId` plus a Hermes-compatible `google_token.json` payload to the webhook. The receiver must map runtime IDs to fixed server-side Hermes home paths and reject arbitrary paths. If no token webhook is configured, a successful OAuth exchange is proved and the token is discarded. Do not put Google client secrets, refresh tokens, signing secrets, or webhook secrets in public `NEXT_PUBLIC_*` variables.
+The callback signs the exact HMAC-v1 request body, runtime ID, authoritative registry epoch, timestamp, nonce, key ID, and content digest before sending the Hermes-compatible `google_token.json` payload. The receiver must verify the signature and replay window, resolve runtime IDs to fixed server-side Hermes home paths, enforce the exact active epoch, and reject arbitrary paths. Managed one-time sessions fail closed if the complete receiver configuration is absent; only the legacy debug OAuth path may skip storage. Do not put Google client secrets, refresh tokens, signing secrets, or webhook secrets in public `NEXT_PUBLIC_*` variables.

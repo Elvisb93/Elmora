@@ -1,7 +1,7 @@
 import Link from "next/link";
-import type { GoogleConnectViewModel } from "../lib/oauthConnect";
+import type { GoogleConnectDisplayViewModel } from "../lib/oauthConnect";
 
-export function GoogleConnectContent({ view }: { view: GoogleConnectViewModel }) {
+export function GoogleConnectContent({ view }: { view: GoogleConnectDisplayViewModel }) {
   return (
     <main className="container doc-page">
       <article className="doc-card connect-card">
@@ -35,7 +35,7 @@ export function GoogleConnectContent({ view }: { view: GoogleConnectViewModel })
           </section>
         ) : null}
 
-        <div className="notice">
+        <div className="notice" aria-live="polite">
           {view.error ? (
             <span>{view.error}</span>
           ) : view.connectionSession ? (
