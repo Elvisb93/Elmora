@@ -12,6 +12,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type ConnectSessionStoreFactory = () => Promise<ConnectSessionStore>;
+type TokenReceiverProbe = (webhookUrl: URL) => Promise<boolean>;
+
+const tokenReceiverProbeTimeoutMilliseconds = 5_000;
 
 function isSafeConfigurationString(
   value: string | undefined,
@@ -40,11 +43,30 @@ function assertReadinessConfiguration(env: Record<string, string | undefined>) {
   ) {
     throw new Error("Invalid OAuth readiness configuration");
   }
-  assertGoogleTokenStorageConfiguration({
+  const { webhookUrl } = assertGoogleTokenStorageConfiguration({
     storageWebhookUrl: env.ELMORA_TOKEN_WEBHOOK_URL,
     storageWebhookKeyId: env.ELMORA_TOKEN_WEBHOOK_KEY_ID,
     storageWebhookSecret: env.ELMORA_TOKEN_WEBHOOK_SECRET,
   });
+  return webhookUrl;
+}
+
+async function probeTokenReceiverHealth(webhookUrl: URL): Promise<boolean> {
+  const healthUrl = new URL(webhookUrl);
+  healthUrl.pathname = "/healthz";
+  healthUrl.search = "";
+  healthUrl.hash = "";
+  try {
+    const response = await fetch(healthUrl, {
+      method: "GET",
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(tokenReceiverProbeTimeoutMilliseconds),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 function unavailableResponse(outcome: "invalid_configuration" | "dependency_unavailable") {
@@ -64,6 +86,7 @@ export async function handleReadinessRequest(
   request: NextRequest,
   getStore: ConnectSessionStoreFactory = getVercelKvConnectSessionStore,
   env: Record<string, string | undefined> = process.env,
+  probeReceiver: TokenReceiverProbe = probeTokenReceiverHealth,
 ) {
   if (
     !authorizeAgentRegistryAdminRequest({
@@ -77,8 +100,9 @@ export async function handleReadinessRequest(
     );
   }
 
+  let webhookUrl: URL;
   try {
-    assertReadinessConfiguration(env);
+    webhookUrl = assertReadinessConfiguration(env);
   } catch {
     return unavailableResponse("invalid_configuration");
   }
@@ -87,6 +111,9 @@ export async function handleReadinessRequest(
     const store = await getStore();
     if (!store.probeReadiness || !(await store.probeReadiness())) {
       throw new Error("KV readiness capability unavailable");
+    }
+    if (!(await probeReceiver(webhookUrl))) {
+      throw new Error("Token receiver readiness probe failed");
     }
     return NextResponse.json(
       { ready: true },

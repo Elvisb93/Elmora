@@ -110,6 +110,7 @@ describe("authenticated readiness route", () => {
           return createMemoryConnectSessionStore();
         },
         readyEnv,
+        async () => true,
       );
       assert.equal(ready.status, 200);
       assert.deepEqual(await ready.json(), { ready: true });
@@ -140,6 +141,28 @@ describe("authenticated readiness route", () => {
       assert.match(response.headers.get("x-elmora-request-id") ?? "", /^eoe_[A-Za-z0-9_-]{22}$/);
       assert.doesNotMatch(JSON.stringify(payload), /redis|credential|endpoint/i);
     });
+  });
+
+  it("fails closed when the configured token receiver is unreachable", async () => {
+    let receiverProbeCalls = 0;
+    await withAdminSecret(async () => {
+      const response = await handleReadinessRequest(
+        new NextRequest(`${baseUrl}/api/readiness`, {
+          headers: { authorization: `Bearer ${adminSecret}` },
+        }),
+        async () => createMemoryConnectSessionStore(),
+        readyEnv,
+        async (webhookUrl) => {
+          receiverProbeCalls += 1;
+          assert.equal(webhookUrl.toString(), readyEnv.ELMORA_TOKEN_WEBHOOK_URL);
+          return false;
+        },
+      );
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { ready: false });
+      assert.equal(response.headers.get("x-elmora-error-code"), "readiness_check_failed");
+    });
+    assert.equal(receiverProbeCalls, 1);
   });
 
   it("requires a bounded KV write-read-delete and EVAL capability probe", async () => {
@@ -173,6 +196,7 @@ describe("authenticated readiness route", () => {
         }),
         async () => store,
         readyEnv,
+        async () => true,
       );
       assert.equal(response.status, 200);
       assert.deepEqual(commands, ["eval"]);
