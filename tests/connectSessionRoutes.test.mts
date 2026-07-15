@@ -284,6 +284,8 @@ describe("agent-registry route validation and error hygiene", () => {
       const payload = await response.json();
       assert.equal(response.status, 503);
       assert.deepEqual(payload, genericErrors.unavailable);
+      assert.match(response.headers.get("x-elmora-request-id") ?? "", /^eoe_[A-Za-z0-9_-]{22}$/);
+      assert.equal(response.headers.get("x-elmora-error-code"), "agent_registry_register_unavailable");
       assert.doesNotMatch(JSON.stringify(payload), /redis|secret|index|request id/i);
     });
   });
@@ -411,6 +413,8 @@ describe("connect-session create route validation and error hygiene", () => {
     const payload = await response.json();
     assert.equal(response.status, 503);
     assert.deepEqual(payload, genericErrors.unavailable);
+    assert.match(response.headers.get("x-elmora-request-id") ?? "", /^eoe_[A-Za-z0-9_-]{22}$/);
+    assert.equal(response.headers.get("x-elmora-error-code"), "connect_session_create_unavailable");
     assert.doesNotMatch(JSON.stringify(payload), /KV URL|secret/i);
   });
 });
@@ -491,6 +495,8 @@ describe("connect-session status route validation and error hygiene", () => {
     const payload = await unavailable.json();
     assert.equal(unavailable.status, 503);
     assert.deepEqual(payload, genericErrors.unavailable);
+    assert.match(unavailable.headers.get("x-elmora-request-id") ?? "", /^eoe_[A-Za-z0-9_-]{22}$/);
+    assert.equal(unavailable.headers.get("x-elmora-error-code"), "connect_session_status_unavailable");
     assert.doesNotMatch(JSON.stringify(payload), /Redis|endpoint/i);
   });
 });

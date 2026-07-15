@@ -9,7 +9,18 @@ import {
 } from "./oauthConnect";
 
 export type OAuthProviderSlug = "google";
-export type ConnectSessionStatus = "pending" | "processing" | "connected";
+export type ConnectSessionStatus =
+  | "pending"
+  | "processing"
+  | "connected"
+  | "failed"
+  | "reconciliation_required";
+export type ConnectSessionOutcomeCode =
+  | "receiver_rejected"
+  | "delivery_unknown"
+  | "finalization_failed"
+  | "authorization_revoked"
+  | "callback_failed";
 
 export type ConnectSessionRecord = {
   id: string;
@@ -29,6 +40,8 @@ export type ConnectSessionRecord = {
   claimedAt?: string;
   usedAt?: string;
   connectedEmail?: string;
+  outcomeCode?: ConnectSessionOutcomeCode;
+  outcomeAt?: string;
 };
 
 export type ClaimConnectSessionForPersistenceOptions = {
@@ -52,10 +65,23 @@ export type CompleteConnectSessionPersistenceClaimOptions = {
   now: Date;
 };
 
+export type FinalizeConnectSessionPersistenceOutcomeOptions = {
+  sessionId: string;
+  runtimeId: string;
+  provider: OAuthProviderSlug;
+  expectedAgentRegistryVersion: string;
+  expectedTokenHash: string;
+  claimId: string;
+  status: "failed" | "reconciliation_required";
+  outcomeCode: ConnectSessionOutcomeCode;
+  now: Date;
+};
+
 export type ConnectSessionStore = {
   get<T>(key: string): Promise<T | null>;
   set(key: string, value: unknown, options?: { ex?: number }): Promise<unknown>;
   del(...keys: string[]): Promise<unknown>;
+  probeReadiness?(): Promise<boolean>;
   upsertAgentRuntime?(agent: RuntimeRegistryEntry): Promise<RuntimeRegistryEntry | null>;
   revokeAgentRuntime?(
     runtimeId: string,
@@ -73,6 +99,9 @@ export type ConnectSessionStore = {
   ): Promise<ConnectSessionRecord | null>;
   completeConnectSessionPersistenceClaim?(
     options: CompleteConnectSessionPersistenceClaimOptions,
+  ): Promise<ConnectSessionRecord | null>;
+  finalizeConnectSessionPersistenceOutcome?(
+    options: FinalizeConnectSessionPersistenceOutcomeOptions,
   ): Promise<ConnectSessionRecord | null>;
 };
 
@@ -147,6 +176,15 @@ const controlPlaneKvPrefix = `elmora:${controlPlaneRedisHashTag}:${controlPlaneK
 const kvPrefix = `${controlPlaneKvPrefix}:connect-session`;
 const agentRegistryPrefix = `${controlPlaneKvPrefix}:agent-runtime`;
 const agentSecretPrefix = "eac_";
+const readinessProbeScript = `
+redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+local value = redis.call("GET", KEYS[1])
+local deleted = redis.call("DEL", KEYS[1])
+if value == ARGV[1] and deleted == 1 then
+  return 1
+end
+return 0
+`;
 const atomicAgentRuntimeUpsertScript = `
 local proposed = cjson.decode(ARGV[1])
 if type(proposed.registryEpoch) ~= "number"
@@ -282,6 +320,10 @@ for _, provider in ipairs(agent.allowedProviders or {}) do
     break
   end
 end
+local ttl = redis.call("PTTL", KEYS[2])
+if ttl <= 0 then
+  return false
+end
 if agent.status ~= "active"
   or type(agent.registryEpoch) ~= "number"
   or agent.registryEpoch < 1
@@ -291,14 +333,14 @@ if agent.status ~= "active"
   or tostring(agent.registryVersion or "") ~= ARGV[1]
   or tostring(session.registryVersion or "") ~= ARGV[1]
   or not providerAllowed then
+  session.status = "failed"
+  session.outcomeCode = "authorization_revoked"
+  session.outcomeAt = ARGV[3]
+  redis.call("SET", KEYS[2], cjson.encode(session), "PX", ttl)
   redis.call("DEL", KEYS[3])
   return false
 end
 
-local ttl = redis.call("PTTL", KEYS[2])
-if ttl <= 0 then
-  return false
-end
 session.status = "processing"
 session.claimId = ARGV[2]
 session.claimedAt = ARGV[3]
@@ -357,6 +399,39 @@ redis.call("DEL", KEYS[3])
 return 1
 `;
 
+const atomicConnectSessionOutcomeScript = `
+local sessionRaw = redis.call("GET", KEYS[1])
+local tokenSessionId = redis.call("GET", KEYS[2])
+if not sessionRaw or not tokenSessionId then
+  return 0
+end
+
+local session = cjson.decode(sessionRaw)
+if tostring(session.id or "") ~= ARGV[5]
+  or tostring(session.runtimeId or "") ~= ARGV[3]
+  or tostring(session.provider or "") ~= ARGV[4]
+  or tostring(session.registryVersion or "") ~= ARGV[1]
+  or tostring(session.tokenHash or "") ~= ARGV[6]
+  or session.status ~= "processing"
+  or tostring(session.claimId or "") ~= ARGV[2]
+  or tokenSessionId ~= ARGV[5] then
+  return 0
+end
+if ARGV[7] ~= "failed" and ARGV[7] ~= "reconciliation_required" then
+  return 0
+end
+local ttl = redis.call("PTTL", KEYS[1])
+if ttl <= 0 then
+  return 0
+end
+session.status = ARGV[7]
+session.outcomeCode = ARGV[8]
+session.outcomeAt = ARGV[9]
+redis.call("SET", KEYS[1], cjson.encode(session), "EX", ARGV[10])
+redis.call("DEL", KEYS[2])
+return 1
+`;
+
 export function createMemoryConnectSessionStore(): ConnectSessionStore & { dump(): Map<string, unknown> } {
   const values = new Map<string, { value: unknown; expiresAt?: number }>();
 
@@ -385,6 +460,14 @@ export function createMemoryConnectSessionStore(): ConnectSessionStore & { dump(
         values.delete(key);
       }
       return keys.length;
+    },
+    async probeReadiness() {
+      const key = `${controlPlaneKvPrefix}:readiness:memory`;
+      const value = randomBytes(16).toString("hex");
+      values.set(key, { value, expiresAt: Date.now() + 15_000 });
+      const stored = values.get(key)?.value;
+      const deleted = values.delete(key);
+      return stored === value && deleted;
     },
     async upsertAgentRuntime(agent) {
       const secretKey = agentConnectSecretKey(agent.connectSecretHash);
@@ -504,6 +587,16 @@ export function createMemoryConnectSessionStore(): ConnectSessionStore & { dump(
         session.registryVersion !== options.expectedAgentRegistryVersion ||
         !agent.allowedProviders.includes(options.provider)
       ) {
+        const failed: ConnectSessionRecord = {
+          ...session,
+          status: "failed",
+          outcomeCode: "authorization_revoked",
+          outcomeAt: options.now.toISOString(),
+        };
+        values.set(connectSessionKey(options.sessionId), {
+          value: failed,
+          expiresAt: sessionRecord.expiresAt,
+        });
         values.delete(tokenKey);
         return null;
       }
@@ -571,6 +664,45 @@ export function createMemoryConnectSessionStore(): ConnectSessionStore & { dump(
       values.delete(connectSessionTokenKey(session.tokenHash));
       return connected;
     },
+    async finalizeConnectSessionPersistenceOutcome(options) {
+      const sessionRecord = values.get(connectSessionKey(options.sessionId));
+      const tokenKey = connectSessionTokenKey(options.expectedTokenHash);
+      const tokenRecord = values.get(tokenKey);
+      if (
+        !sessionRecord ||
+        isExpired(sessionRecord) ||
+        !tokenRecord ||
+        isExpired(tokenRecord)
+      ) {
+        return null;
+      }
+      const session = sessionRecord.value as ConnectSessionRecord;
+      if (
+        session.id !== options.sessionId ||
+        session.runtimeId !== options.runtimeId ||
+        session.provider !== options.provider ||
+        session.registryVersion !== options.expectedAgentRegistryVersion ||
+        session.status !== "processing" ||
+        session.claimId !== options.claimId ||
+        session.tokenHash !== options.expectedTokenHash ||
+        tokenRecord.value !== options.sessionId ||
+        isSessionExpired(session, options.now)
+      ) {
+        return null;
+      }
+      const terminal: ConnectSessionRecord = {
+        ...session,
+        status: options.status,
+        outcomeCode: options.outcomeCode,
+        outcomeAt: options.now.toISOString(),
+      };
+      values.set(connectSessionKey(options.sessionId), {
+        value: terminal,
+        expiresAt: Date.now() + connectedRecordTtlSeconds * 1000,
+      });
+      values.delete(tokenKey);
+      return terminal;
+    },
     dump() {
       return new Map([...values].map(([key, record]) => [key, record.value]));
     },
@@ -605,6 +737,11 @@ export function createVercelKvConnectSessionStore(kv: VercelKvClient): ConnectSe
     },
     del(...keys: string[]) {
       return kv.del(...keys);
+    },
+    async probeReadiness() {
+      const key = `${controlPlaneKvPrefix}:readiness:${randomBytes(16).toString("hex")}`;
+      const value = randomBytes(16).toString("hex");
+      return Number(await kv.eval(readinessProbeScript, [key], [value, "15"])) === 1;
     },
     async upsertAgentRuntime(agent) {
       const runtimeKey = agentRuntimeKey(agent.runtimeId);
@@ -733,6 +870,31 @@ export function createVercelKvConnectSessionStore(kv: VercelKvClient): ConnectSe
         ],
       );
       if (Number(connected) !== 1) {
+        return null;
+      }
+      return kv.get<ConnectSessionRecord>(connectSessionKey(options.sessionId));
+    },
+    async finalizeConnectSessionPersistenceOutcome(options) {
+      const finalized = await kv.eval(
+        atomicConnectSessionOutcomeScript,
+        [
+          connectSessionKey(options.sessionId),
+          connectSessionTokenKey(options.expectedTokenHash),
+        ],
+        [
+          options.expectedAgentRegistryVersion,
+          options.claimId,
+          options.runtimeId,
+          options.provider,
+          options.sessionId,
+          options.expectedTokenHash,
+          options.status,
+          options.outcomeCode,
+          options.now.toISOString(),
+          String(connectedRecordTtlSeconds),
+        ],
+      );
+      if (Number(finalized) !== 1) {
         return null;
       }
       return kv.get<ConnectSessionRecord>(connectSessionKey(options.sessionId));
@@ -1018,6 +1180,16 @@ export async function completeConnectSessionPersistenceClaim({
     throw new Error("Connect-session store does not support atomic callback completion");
   }
   return store.completeConnectSessionPersistenceClaim(options);
+}
+
+export async function finalizeConnectSessionPersistenceOutcome({
+  store,
+  ...options
+}: { store: ConnectSessionStore } & FinalizeConnectSessionPersistenceOutcomeOptions) {
+  if (!store.finalizeConnectSessionPersistenceOutcome) {
+    throw new Error("Connect-session store does not support atomic callback outcomes");
+  }
+  return store.finalizeConnectSessionPersistenceOutcome(options);
 }
 
 export async function getConnectSessionById({

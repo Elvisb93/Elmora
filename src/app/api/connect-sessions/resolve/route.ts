@@ -4,108 +4,116 @@ import {
   resolveGoogleConnectSessionViewModel,
   type ConnectSessionStore,
 } from "../../../../lib/connectSessions";
+import { isCanonicalConnectToken } from "../../../../lib/connectLink";
 import type { GoogleConnectDisplayViewModel } from "../../../../lib/oauthConnect";
+import { operationalErrorHeaders } from "../../../../lib/operationalTelemetry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const tokenPattern = /^ecs_[A-Za-z0-9_-]{43}$/;
-const privacyHeaders = {
+const maxBodyLength = 2_048;
+const responseHeaders = {
   "Cache-Control": "private, no-store",
   "Referrer-Policy": "no-referrer",
 };
 
 type ConnectSessionStoreFactory = () => Promise<ConnectSessionStore>;
 
-async function readBoundedText(request: NextRequest, maxBytes: number): Promise<string | null> {
-  if (!request.body) {
-    return "";
-  }
-
-  const reader = request.body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let total = 0;
-  let text = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) {
-        return text + decoder.decode();
-      }
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        return null;
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-  } catch {
-    return null;
-  } finally {
-    reader.releaseLock();
-  }
+function toPublicConnectView(
+  view: Awaited<ReturnType<typeof resolveGoogleConnectSessionViewModel>>,
+): GoogleConnectDisplayViewModel {
+  return {
+    provider: view.provider,
+    mode: view.mode,
+    configured: view.configured,
+    showDeveloperDetails: view.showDeveloperDetails,
+    clientSlug: view.clientSlug,
+    runtimeId: "private",
+    redirectUri: view.redirectUri,
+    heading: view.heading,
+    eyebrow: view.eyebrow,
+    intro: view.intro,
+    primaryButtonLabel: view.primaryButtonLabel,
+    oauthUrl: view.oauthUrl,
+    connectionSession: view.connectionSession
+      ? {
+          agentName: view.connectionSession.agentName,
+          clientName: view.connectionSession.clientName,
+          requestedEmail: view.connectionSession.requestedEmail,
+          expiresAt: view.connectionSession.expiresAt,
+        }
+      : undefined,
+  };
 }
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status, headers: privacyHeaders });
+function jsonResponse(body: unknown, status: number, headers: Record<string, string> = {}) {
+  return NextResponse.json(body, { status, headers: { ...responseHeaders, ...headers } });
+}
+
+function parseBody(rawBody: string): { token: string } | null {
+  if (rawBody.length > maxBodyLength) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || !isCanonicalConnectToken(record.token)) {
+    return null;
+  }
+  return { token: record.token };
 }
 
 export async function handleResolveConnectSessionRequest(
   request: NextRequest,
   getStore: ConnectSessionStoreFactory = getVercelKvConnectSessionStore,
   env: Record<string, string | undefined> = process.env,
+  now = new Date(),
 ) {
   if (request.method !== "POST") {
-    return jsonError("Method not allowed", 405);
+    return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
-  const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  const declaredLength = Number(request.headers.get("content-length") ?? "0");
-  if (
-    contentType !== "text/plain" ||
-    !Number.isSafeInteger(declaredLength) ||
-    declaredLength < 0 ||
-    declaredLength > 128
-  ) {
-    return jsonError("Invalid request", 400);
+  const contentLength = Number(request.headers["get"]("content-length") ?? "0");
+  if (Number.isFinite(contentLength) && contentLength > maxBodyLength) {
+    return jsonResponse({ error: "Request too large" }, 413);
   }
-
-  const rawToken = await readBoundedText(request, 128);
-  if (rawToken === null || !tokenPattern.test(rawToken)) {
-    return jsonError("Invalid request", 400);
+  const rawBody = await request.text().catch(() => "");
+  if (rawBody.length > maxBodyLength) {
+    return jsonResponse({ error: "Request too large" }, 413);
+  }
+  const body = parseBody(rawBody);
+  if (!body) {
+    return jsonResponse({ error: "Invalid request" }, 400);
   }
 
   try {
     const store = await getStore();
-    const view = await resolveGoogleConnectSessionViewModel({ store, rawToken, env });
-    if (!view.configured || view.error || !view.oauthUrl || !view.connectionSession) {
-      return jsonError("Connection link unavailable", 404);
+    const view = await resolveGoogleConnectSessionViewModel({
+      store,
+      rawToken: body.token,
+      env,
+      now,
+    });
+    if (!view.connectionSession) {
+      return jsonResponse({ error: "Connection link unavailable" }, 404);
     }
-
-    const connectionSession = view.connectionSession;
-    const publicView: GoogleConnectDisplayViewModel = {
-      provider: view.provider,
-      mode: "client",
-      configured: true,
-      showDeveloperDetails: false,
-      runtimeId: "private",
-      redirectUri: view.redirectUri,
-      heading: view.heading,
-      eyebrow: view.eyebrow,
-      intro: view.intro,
-      primaryButtonLabel: view.primaryButtonLabel,
-      oauthUrl: view.oauthUrl,
-      connectionSession: {
-        agentName: connectionSession.agentName,
-        clientName: connectionSession.clientName,
-        requestedEmail: connectionSession.requestedEmail,
-        expiresAt: connectionSession.expiresAt,
-      },
-    };
-
-    return NextResponse.json({ view: publicView }, { status: 200, headers: privacyHeaders });
+    if (!view.configured || !view.oauthUrl || view.error) {
+      return jsonResponse({ error: "Service temporarily unavailable" }, 503);
+    }
+    return jsonResponse({ view: toPublicConnectView(view) }, 200);
   } catch {
-    return jsonError("Service temporarily unavailable", 503);
+    return jsonResponse(
+      { error: "Service temporarily unavailable" },
+      503,
+      operationalErrorHeaders("connect_session_resolve_unavailable"),
+    );
   }
 }
 

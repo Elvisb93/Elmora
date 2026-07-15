@@ -13,6 +13,7 @@ import {
   createConnectSession,
   createConnectSessionId,
   createMemoryConnectSessionStore,
+  finalizeConnectSessionPersistenceOutcome,
   getAgentRuntime,
   getConnectSessionByToken,
   hashConnectToken,
@@ -652,6 +653,84 @@ describe("KV-backed one-time OAuth connect sessions", () => {
 
     assert.equal(loaded?.id, created.session.id);
     assert.equal(loaded?.status, "pending");
+  });
+
+  it("atomically finalizes a claimed receiver rejection and removes the one-time token index", async () => {
+    const store = createMemoryConnectSessionStore();
+    const now = new Date("2026-07-07T12:00:00.000Z");
+    const { agent } = await registerAgentRuntime({
+      store,
+      registryEpoch: 41,
+      runtimeId: "test-agent-2",
+      agentName: "Elmora Test Worker",
+      clientName: "Elmora Test Client",
+      rawConnectSecret: "agent-one-time-bearer-secret",
+      now,
+    });
+    const created = await createConnectSession({
+      store,
+      provider: "google",
+      runtimeId: agent.runtimeId,
+      expectedAgentRegistryEpoch: agent.registryEpoch,
+      expectedAgentRegistryVersion: agent.registryVersion,
+      agentName: agent.agentName,
+      clientName: agent.clientName,
+      rawToken: "cs_test_terminal_failure",
+      sessionId: "ocs_test_terminal_failure",
+      now,
+    });
+    const claimId = "occ_test_terminal_failure";
+    const claimed = await claimConnectSessionForPersistence({
+      store,
+      sessionId: created.session.id,
+      runtimeId: agent.runtimeId,
+      provider: "google",
+      expectedAgentRegistryVersion: agent.registryVersion,
+      expectedTokenHash: created.session.tokenHash,
+      claimId,
+      now: new Date("2026-07-07T12:01:00.000Z"),
+    });
+    assert.equal(claimed?.status, "processing");
+
+    const finalized = await finalizeConnectSessionPersistenceOutcome({
+      store,
+      sessionId: created.session.id,
+      runtimeId: agent.runtimeId,
+      provider: "google",
+      expectedAgentRegistryVersion: agent.registryVersion,
+      expectedTokenHash: created.session.tokenHash,
+      claimId,
+      status: "failed",
+      outcomeCode: "receiver_rejected",
+      now: new Date("2026-07-07T12:02:00.000Z"),
+    });
+
+    assert.equal(finalized?.status, "failed");
+    assert.equal(finalized?.outcomeCode, "receiver_rejected");
+    assert.equal(finalized?.outcomeAt, "2026-07-07T12:02:00.000Z");
+    assert.equal(
+      await getConnectSessionByToken({
+        store,
+        rawToken: created.rawToken,
+        now: new Date("2026-07-07T12:03:00.000Z"),
+      }),
+      null,
+    );
+    assert.equal(
+      await finalizeConnectSessionPersistenceOutcome({
+        store,
+        sessionId: created.session.id,
+        runtimeId: agent.runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion: agent.registryVersion,
+        expectedTokenHash: created.session.tokenHash,
+        claimId,
+        status: "failed",
+        outcomeCode: "receiver_rejected",
+        now: new Date("2026-07-07T12:04:00.000Z"),
+      }),
+      null,
+    );
   });
 
   it("renders a temporary Google connect page with state bound to the connect session id", async () => {

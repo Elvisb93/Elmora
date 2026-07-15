@@ -6,6 +6,7 @@ import {
   type ConnectSessionStore,
   type OAuthProviderSlug,
 } from "../../../lib/connectSessions";
+import { operationalErrorHeaders } from "../../../lib/operationalTelemetry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -246,7 +247,13 @@ export async function handleRegisterAgentRuntimeRequest(
       { status: 201 },
     );
   } catch {
-    return jsonError("Service temporarily unavailable", 503);
+    return NextResponse.json(
+      { error: "Service temporarily unavailable" },
+      {
+        status: 503,
+        headers: operationalErrorHeaders("agent_registry_register_unavailable"),
+      },
+    );
   }
 }
 

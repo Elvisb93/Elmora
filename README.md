@@ -14,6 +14,7 @@ A small production-ready Next.js landing page for Elmora, designed for deploymen
 - `/api/connect-sessions` — agent-authenticated API for creating one-time connect links
 - `/api/connect-sessions/resolve` — bounded no-store POST resolver used after the browser clears the private fragment
 - `/api/connect-sessions/[sessionId]/status` — agent-authenticated status check for a connect session
+- `/api/readiness` — admin-authenticated OAuth, receiver, and KV readiness check
 - `/oauth/google/callback` — server-side OAuth callback screen
 
 ## Local development
@@ -68,7 +69,7 @@ Elmora’s preferred no-portal flow is:
 4. The client opens that private link, sees the client/agent identity, and authorises Google.
 5. The callback verifies signed state and the Google account email/domain, atomically claims the pending session, revalidates the active KV registry version immediately before handoff, stores `google_token.json` into the mapped runtime, then atomically marks the session used and deletes the public token lookup.
 
-A receiver persistence error is **not** a connected result. Elmora leaves the claimed session in `processing`, removes it from the public-link path, and does not automatically redeliver a token because a network failure can leave receiver outcome unknown. The agent can inspect the authenticated session status; after expiry it must create a fresh one-time link. The registry/version check narrows the control-plane race immediately before handoff, but the Phase 2 receiver must still reject inactive or unknown local runtimes.
+A receiver persistence error is **not** a connected result. Explicit receiver rejection ends as `failed`; an ambiguous transport outcome or receiver acceptance followed by control-plane finalization failure ends as `reconciliation_required`. Terminal status responses expose only a bounded `outcomeCode` and `outcomeAt`, never receiver exception details. Elmora removes terminal sessions from the public-link path and does not automatically redeliver a token because an ambiguous network failure may already have reached the receiver. The registry/version check narrows the control-plane race immediately before handoff, but the Phase 2 receiver must still reject inactive or unknown local runtimes.
 
 Required Vercel KV / Redis env vars are provided by the Vercel storage integration, typically:
 
@@ -85,6 +86,7 @@ curl -sS -X POST https://elmora-kappa.vercel.app/api/agent-runtimes \
   -H 'content-type: application/json' \
   -d '{
     "runtimeId":"client-a",
+    "registryEpoch":1,
     "agentName":"Acme Inbox Agent",
     "clientName":"Acme Events",
     "allowedProviders":["google"],
@@ -135,6 +137,35 @@ Response:
 ```
 
 The raw `ecs_...` token is shown only once to the agent. It is carried in the URL fragment so Vercel and intermediary HTTP request logs do not receive it. The browser clears the fragment before sending the token in a bounded, same-origin, no-store POST to `/api/connect-sessions/resolve`; that response never reflects the raw token or runtime ID. KV stores only the token's SHA-256 hash. Once OAuth succeeds, the public token lookup is deleted; old links show an expired/unavailable message.
+
+## First-client rollout gate
+
+Run the deterministic local gates before deployment:
+
+```bash
+npm test
+npm run typecheck
+npm run build
+npm audit --omit=dev --audit-level=moderate
+```
+
+After deployment, verify authenticated control-plane readiness without exposing configuration details. A ready response means OAuth signing, Google exchange, managed token receiver, and KV configuration are all available:
+
+```bash
+curl -fsS https://elmora-kappa.vercel.app/api/readiness \
+  -H "authorization: Bearer $ELMORA_AGENT_REGISTRY_ADMIN_SECRET"
+```
+
+For the full first-client gate, use environment variables so credentials never appear in command history or process arguments:
+
+```bash
+export ELMORA_READINESS_BASE_URL=https://elmora-kappa.vercel.app
+export ELMORA_READINESS_RUNTIME_ID=client-a
+export ELMORA_READINESS_AGENT_CONNECT_SECRET="$CLIENT_A_CONNECT_SECRET"
+npm run verify:first-client
+```
+
+`verify:first-client` reads `ELMORA_AGENT_REGISTRY_ADMIN_SECRET` from the environment and checks the authenticated readiness endpoint, active runtime/provider policy, fragment-only one-time connect-link shape, bounded POST resolution, and connect-page referrer protection. It exits nonzero with a fixed generic message on any failure and never prints credentials or the generated capability token. Omit `ELMORA_READINESS_AGENT_CONNECT_SECRET` only when running the reduced control-plane/runtime preflight rather than the full first-client gate.
 
 ## Requested Google Workspace scopes
 

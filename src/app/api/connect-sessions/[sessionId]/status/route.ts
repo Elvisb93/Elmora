@@ -6,6 +6,7 @@ import {
   type ConnectSessionRecord,
   type ConnectSessionStore,
 } from "../../../../../lib/connectSessions";
+import { operationalErrorHeaders } from "../../../../../lib/operationalTelemetry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,9 +66,17 @@ export async function handleConnectSessionStatusRequest(
       expiresAt: session.expiresAt,
       usedAt: session.usedAt,
       connectedEmail: session.connectedEmail,
+      outcomeCode: session.outcomeCode,
+      outcomeAt: session.outcomeAt,
     });
   } catch {
-    return jsonError("Service temporarily unavailable", 503);
+    return NextResponse.json(
+      { error: "Service temporarily unavailable" },
+      {
+        status: 503,
+        headers: operationalErrorHeaders("connect_session_status_unavailable"),
+      },
+    );
   }
 }
 

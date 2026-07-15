@@ -9,7 +9,8 @@
     "start": "next start",
     "test": "tsx --test tests/*.test.mts",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "verify:first-client": "tsx scripts/verify-first-client-rollout.ts"
   },
   "dependencies": {
     "@vercel/kv": "^3.0.0",

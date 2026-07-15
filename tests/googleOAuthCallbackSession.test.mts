@@ -507,7 +507,7 @@ describe("Google OAuth callback connect-session handling", () => {
     }
   });
 
-  it("leaves a receiver-persistence failure processing and never reports it connected", async () => {
+  it("finalizes an explicit receiver-persistence rejection as failed and never reports connected", async () => {
     const store = createMemoryConnectSessionStore();
     const agent = await registerCallbackFixture(store);
     const created = await createConnectSession({
@@ -564,7 +564,9 @@ describe("Google OAuth callback connect-session handling", () => {
     });
 
     assert.equal(result.status, "failed");
-    assert.equal((await store.get<{ status: string }>(connectSessionKey(created.session.id)))?.status, "processing");
+    const rejected = await store.get<{ status: string; outcomeCode?: string }>(connectSessionKey(created.session.id));
+    assert.equal(rejected?.status, "failed");
+    assert.equal(rejected?.outcomeCode, "receiver_rejected");
     assert.equal(
       await getConnectSessionByToken({ store, rawToken: created.rawToken, now: new Date("2026-07-07T12:03:00.000Z") }),
       null,
@@ -712,7 +714,9 @@ describe("Google OAuth callback connect-session handling", () => {
 
     assert.equal(result.status, "failed");
     assert.match(result.message, /receiver accepted.*could not finalize.*status/i);
-    assert.equal((await store.get<{ status: string }>(connectSessionKey(created.session.id)))?.status, "processing");
+    const terminal = await store.get<{ status: string; outcomeCode?: string }>(connectSessionKey(created.session.id));
+    assert.equal(terminal?.status, "reconciliation_required");
+    assert.equal(terminal?.outcomeCode, "finalization_failed");
   });
 
   it("does not expose provider exception details in public callback failures", async () => {

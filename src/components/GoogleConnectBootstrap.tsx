@@ -1,13 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { GoogleConnectDisplayViewModel } from "../lib/oauthConnect";
-import { googleWorkspaceProvider } from "../lib/oauthConnect";
+import { takeConnectTokenFromBrowserLocation } from "../lib/connectLink";
+import {
+  googleWorkspaceProvider,
+  type GoogleConnectDisplayViewModel,
+} from "../lib/oauthConnect";
 import { GoogleConnectContent } from "./GoogleConnectContent";
 
-const tokenPattern = /^ecs_[A-Za-z0-9_-]{43}$/;
+type BootstrapState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; view: GoogleConnectDisplayViewModel }
+  | { status: "error" };
 
-function privateView(message: string): GoogleConnectDisplayViewModel {
+export function createUnavailableGoogleConnectView(): GoogleConnectDisplayViewModel {
   return {
     provider: googleWorkspaceProvider,
     mode: "client",
@@ -15,51 +22,51 @@ function privateView(message: string): GoogleConnectDisplayViewModel {
     showDeveloperDetails: false,
     runtimeId: "private",
     redirectUri: "/oauth/google/callback",
-    heading: "Private Google connection",
+    heading: "Connect Google Workspace",
     eyebrow: "Private Workspace connection",
     intro: googleWorkspaceProvider.summary,
     primaryButtonLabel: "Connect Google Workspace",
-    error: message,
+    error: "This connection link is unavailable. Ask your Elmora agent for a fresh link.",
   };
 }
 
-const loadingView = privateView("Checking this private connection link…");
-export function createUnavailableGoogleConnectView() {
-  return privateView("This connection link is unavailable. Ask your Elmora agent for a fresh link.");
+function ConnectMessage({ message }: { message: string }) {
+  return (
+    <main className="container doc-page">
+      <article className="doc-card connect-card">
+        <p className="eyebrow">Private Workspace connection</p>
+        <h1>Connect Google Workspace</h1>
+        <p className="lede connect-lede">{message}</p>
+      </article>
+    </main>
+  );
 }
-const unavailableView = createUnavailableGoogleConnectView();
 
 export function GoogleConnectBootstrap({ fallbackView }: { fallbackView: GoogleConnectDisplayViewModel }) {
-  const [view, setView] = useState<GoogleConnectDisplayViewModel>(loadingView);
-  const fragmentToken = useRef<string | null | undefined>(undefined);
+  const started = useRef(false);
+  const [state, setState] = useState<BootstrapState>({ status: "idle" });
 
   useEffect(() => {
-    if (fragmentToken.current === undefined) {
-      const rawFragment = window.location.hash.startsWith("#")
-        ? window.location.hash.slice(1)
-        : window.location.hash;
-      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-      const fragment = new URLSearchParams(rawFragment);
-      const keys = [...fragment.keys()];
-      fragmentToken.current =
-        keys.length === 1 && keys[0] === "token" ? fragment.get("token") : null;
-    }
-
-    const token = fragmentToken.current;
-    if (!token) {
-      setView(fallbackView);
+    if (started.current) {
       return;
     }
-    if (!tokenPattern.test(token)) {
-      setView(unavailableView);
+    started.current = true;
+    const hadFragment = window.location.hash.length > 0;
+    const token = takeConnectTokenFromBrowserLocation(window.location, window.history);
+    if (!hadFragment) {
+      return;
+    }
+    if (!token) {
+      setState({ status: "error" });
       return;
     }
 
     const controller = new AbortController();
+    setState({ status: "loading" });
     void fetch("/api/connect-sessions/resolve", {
       method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
       cache: "no-store",
       credentials: "same-origin",
       referrerPolicy: "no-referrer",
@@ -67,22 +74,31 @@ export function GoogleConnectBootstrap({ fallbackView }: { fallbackView: GoogleC
     })
       .then(async (response) => {
         if (!response.ok) {
-          throw new Error("unavailable");
+          throw new Error("connect link unavailable");
         }
         const payload = (await response.json()) as { view?: GoogleConnectDisplayViewModel };
-        if (!payload.view?.configured || !payload.view.oauthUrl) {
-          throw new Error("unavailable");
+        if (!payload.view?.oauthUrl || !payload.view.configured) {
+          throw new Error("connect link unavailable");
         }
-        setView(payload.view);
+        setState({ status: "ready", view: payload.view });
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setView(unavailableView);
+          setState({ status: "error" });
         }
       });
 
     return () => controller.abort();
-  }, [fallbackView]);
+  }, []);
 
-  return <GoogleConnectContent view={view} />;
+  if (state.status === "idle") {
+    return <GoogleConnectContent view={fallbackView} />;
+  }
+  if (state.status === "loading") {
+    return <ConnectMessage message="Checking this private one-time connection link…" />;
+  }
+  if (state.status === "ready") {
+    return <GoogleConnectContent view={state.view} />;
+  }
+  return <GoogleConnectContent view={createUnavailableGoogleConnectView()} />;
 }

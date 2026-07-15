@@ -6,6 +6,7 @@ import {
   revokeAgentRuntime,
   type ConnectSessionStore,
 } from "../../../../lib/connectSessions";
+import { operationalErrorHeaders } from "../../../../lib/operationalTelemetry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,7 +50,13 @@ export async function handleRevokeAgentRuntimeRequest(
     }
     return NextResponse.json({ runtimeId, status: "revoked" });
   } catch {
-    return jsonError("Service temporarily unavailable", 503);
+    return NextResponse.json(
+      { error: "Service temporarily unavailable" },
+      {
+        status: 503,
+        headers: operationalErrorHeaders("agent_registry_revoke_unavailable"),
+      },
+    );
   }
 }
 
@@ -90,7 +97,13 @@ export async function handleGetAgentRuntimeStatusRequest(
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch {
-    return jsonError("Service temporarily unavailable", 503);
+    return NextResponse.json(
+      { error: "Service temporarily unavailable" },
+      {
+        status: 503,
+        headers: operationalErrorHeaders("agent_runtime_status_unavailable"),
+      },
+    );
   }
 }
 

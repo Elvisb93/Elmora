@@ -7,6 +7,7 @@ import {
   type OAuthProviderSlug,
 } from "../../../lib/connectSessions";
 import { getSiteUrl } from "../../../lib/oauthConnect";
+import { operationalErrorHeaders } from "../../../lib/operationalTelemetry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -178,7 +179,13 @@ export async function handleCreateConnectSessionRequest(
       { status: 201 },
     );
   } catch {
-    return jsonError("Service temporarily unavailable", 503);
+    return NextResponse.json(
+      { error: "Service temporarily unavailable" },
+      {
+        status: 503,
+        headers: operationalErrorHeaders("connect_session_create_unavailable"),
+      },
+    );
   }
 }
 

@@ -201,6 +201,45 @@ describe("@vercel/kv Lua adapter compatibility", () => {
       tokenHash,
     ]);
 
+    const reconciled = {
+      ...claimed,
+      status: "reconciliation_required" as const,
+      outcomeCode: "delivery_unknown" as const,
+      outcomeAt: "2026-07-07T12:03:00.000Z",
+    };
+    client.values.set(connectSessionKey(session.id), reconciled);
+    client.evalResults.push(1);
+    assert.deepEqual(
+      await store.finalizeConnectSessionPersistenceOutcome?.({
+        sessionId: session.id,
+        runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion: registryVersion,
+        expectedTokenHash: tokenHash,
+        claimId: claimed.claimId,
+        status: "reconciliation_required",
+        outcomeCode: "delivery_unknown",
+        now: new Date(reconciled.outcomeAt),
+      }),
+      reconciled,
+    );
+    assert.deepEqual(client.calls[5]?.[1], [
+      connectSessionKey(session.id),
+      connectSessionTokenKey(tokenHash),
+    ]);
+    assert.deepEqual(client.calls[5]?.[2], [
+      registryVersion,
+      claimed.claimId,
+      runtimeId,
+      "google",
+      session.id,
+      tokenHash,
+      "reconciliation_required",
+      "delivery_unknown",
+      reconciled.outcomeAt,
+      "86400",
+    ]);
+
     for (const [script, keys, args] of client.calls) {
       assert.ok(Array.isArray(keys));
       assert.ok(Array.isArray(args));

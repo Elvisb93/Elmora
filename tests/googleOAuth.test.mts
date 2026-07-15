@@ -7,6 +7,7 @@ import {
   buildGoogleAuthorizedUserToken,
   exchangeGoogleOAuthCode,
   persistGoogleOAuthToken,
+  TokenStorageDeliveryError,
 } from "../src/lib/googleOAuth.ts";
 import { createOAuthNonce, createOAuthState, verifyOAuthState } from "../src/lib/oauthState.ts";
 
@@ -283,6 +284,8 @@ describe("Google OAuth helpers", () => {
     for (const storageWebhookUrl of [
       "http://runtime.example.com/token",
       "https://user:password@runtime.example.com/token",
+      "https://runtime.example.com/token?bearer=secret",
+      "https://runtime.example.com/token#fragment",
       "not-a-url",
     ]) {
       let fetchCalls = 0;
@@ -358,7 +361,7 @@ describe("Google OAuth helpers", () => {
     }
   });
 
-  it("does not leak receiver status details when token storage fails", async () => {
+  it("classifies explicit receiver rejection without leaking receiver details", async () => {
     await assert.rejects(
       () =>
         persistGoogleOAuthToken(
@@ -378,7 +381,39 @@ describe("Google OAuth helpers", () => {
           },
           async () => new Response("receiver database exploded", { status: 599, statusText: "Secret Failure" }),
         ),
-      { message: "Token storage request failed" },
+      (error: unknown) =>
+        error instanceof TokenStorageDeliveryError &&
+        error.outcome === "rejected" &&
+        error.message === "Token storage request failed",
+    );
+  });
+
+  it("classifies transport failure as an unknown delivery outcome", async () => {
+    await assert.rejects(
+      () =>
+        persistGoogleOAuthToken(
+          {
+            clientRuntimeId: "elmora-demo",
+            registryEpoch: 7,
+            storageWebhookUrl: "https://runtime.example.com/oauth/google/token",
+            storageWebhookKeyId: "primary-v1",
+            storageWebhookSecret: "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
+            tokenFile: {
+              type: "authorized_user",
+              client_id: "client-id.apps.googleusercontent.com",
+              client_secret: "server-only-test-secret",
+              refresh_token: "test-refresh-token",
+              token_uri: "https://oauth2.googleapis.com/token",
+            },
+          },
+          async () => {
+            throw new Error("socket closed after request write");
+          },
+        ),
+      (error: unknown) =>
+        error instanceof TokenStorageDeliveryError &&
+        error.outcome === "unknown" &&
+        error.message === "Token storage request failed",
     );
   });
 });

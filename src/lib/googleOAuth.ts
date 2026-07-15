@@ -57,6 +57,18 @@ export type PersistGoogleOAuthTokenResult =
   | { status: "stored" }
   | { status: "skipped"; reason: string };
 
+export class TokenStorageDeliveryError extends Error {
+  readonly outcome: "rejected" | "unknown";
+
+  constructor(outcome: "rejected" | "unknown") {
+    super("Token storage request failed");
+    this.name = "TokenStorageDeliveryError";
+    this.outcome = outcome;
+  }
+}
+
+const tokenStorageTimeoutMilliseconds = 10_000;
+
 type GoogleOAuthErrorResponse = {
   error?: string;
   error_description?: string;
@@ -221,6 +233,7 @@ function parseSecureWebhookUrl(value: string): URL | null {
       !url.hostname ||
       url.username ||
       url.password ||
+      url.search ||
       url.hash
     ) {
       return null;
@@ -338,13 +351,14 @@ export async function persistGoogleOAuthToken(
         "X-Elmora-Signature": signature,
       },
       body,
+      signal: AbortSignal.timeout(tokenStorageTimeoutMilliseconds),
     });
   } catch {
-    throw new Error("Token storage request failed");
+    throw new TokenStorageDeliveryError("unknown");
   }
 
   if (!response.ok) {
-    throw new Error("Token storage request failed");
+    throw new TokenStorageDeliveryError("rejected");
   }
 
   return { status: "stored" };

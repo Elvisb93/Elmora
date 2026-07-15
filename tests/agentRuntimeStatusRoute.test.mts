@@ -220,6 +220,8 @@ describe("authenticated agent-runtime status GET", () => {
 
       assert.equal(response.status, 503);
       assert.deepEqual(payload, genericErrors.unavailable);
+      assert.match(response.headers.get("x-elmora-request-id") ?? "", /^eoe_[A-Za-z0-9_-]{22}$/);
+      assert.equal(response.headers.get("x-elmora-error-code"), "agent_runtime_status_unavailable");
       assert.doesNotMatch(JSON.stringify(payload), /redis|registry secret|token|filesystem/i);
     });
   });

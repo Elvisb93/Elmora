@@ -4,17 +4,21 @@ import {
   buildGoogleAuthorizedUserToken,
   exchangeGoogleOAuthCode,
   persistGoogleOAuthToken,
+  TokenStorageDeliveryError,
   type GoogleOAuthTokenResponse,
 } from "./googleOAuth";
 import { defaultGoogleOAuthClientId, getSiteUrl, googleWorkspaceProvider } from "./oauthConnect";
+import { emitOperationalEvent, type OperationalOutcomeCode } from "./operationalTelemetry";
 import { parseRuntimeAllowlist, verifyOAuthState } from "./oauthState";
 import {
   claimConnectSessionForPersistence,
   completeConnectSessionPersistenceClaim,
   createConnectSessionClaimId,
+  finalizeConnectSessionPersistenceOutcome,
   getAgentRuntime,
   getConnectSessionById,
   getVercelKvConnectSessionStore,
+  type ConnectSessionOutcomeCode,
   type ConnectSessionStore,
 } from "./connectSessions";
 
@@ -241,6 +245,17 @@ export async function handleGoogleOAuthCallback({
   }
 
   let receiverAcceptedToken = false;
+  let knownFailureCode: ConnectSessionOutcomeCode | undefined;
+  let persistenceContext:
+    | {
+        store: ConnectSessionStore;
+        sessionId: string;
+        runtimeId: string;
+        expectedAgentRegistryVersion: string;
+        expectedTokenHash: string;
+        claimId: string;
+      }
+    | undefined;
 
   try {
     const verifiedState = verifyOAuthState({
@@ -289,6 +304,7 @@ export async function handleGoogleOAuthCallback({
         activeAgent.registryVersion !== session.registryVersion ||
         !activeAgent.allowedProviders.includes(session.provider)
       ) {
+        knownFailureCode = "authorization_revoked";
         await claimConnectSessionForPersistence({
           store: resolvedStore,
           sessionId: session.id,
@@ -381,6 +397,14 @@ export async function handleGoogleOAuthCallback({
       if (!claimedSession) {
         throw new Error("Connect session agent was revoked or its authorization changed");
       }
+      persistenceContext = {
+        store: resolvedStore,
+        sessionId: connectSessionId,
+        runtimeId,
+        expectedAgentRegistryVersion,
+        expectedTokenHash: connectSessionTokenHash,
+        claimId: callbackClaimId,
+      };
 
       const activeAgent = await getAgentRuntime({ store: resolvedStore, runtimeId });
       if (
@@ -390,6 +414,7 @@ export async function handleGoogleOAuthCallback({
         activeAgent.registryVersion !== expectedAgentRegistryVersion ||
         !activeAgent.allowedProviders.includes("google")
       ) {
+        knownFailureCode = "authorization_revoked";
         throw new Error(
           "Connect session agent was revoked before token persistence was authorized",
         );
@@ -452,16 +477,50 @@ export async function handleGoogleOAuthCallback({
       storage: storage.status,
       storageDetail: storage.status === "skipped" ? storage.reason : undefined,
     };
-  } catch {
+  } catch (error) {
+    let terminalStatus: "failed" | "reconciliation_required" = "failed";
+    let outcomeCode: ConnectSessionOutcomeCode = knownFailureCode ?? "callback_failed";
+    let message = genericCallbackFailureMessage;
+
     if (receiverAcceptedToken) {
-      return {
-        status: "failed",
-        message: receiverAcceptedFinalizationFailureMessage,
-      };
+      terminalStatus = "reconciliation_required";
+      outcomeCode = "finalization_failed";
+      message = receiverAcceptedFinalizationFailureMessage;
+    } else if (error instanceof TokenStorageDeliveryError) {
+      terminalStatus = error.outcome === "unknown" ? "reconciliation_required" : "failed";
+      outcomeCode = error.outcome === "unknown" ? "delivery_unknown" : "receiver_rejected";
+      message =
+        error.outcome === "unknown"
+          ? receiverAcceptedFinalizationFailureMessage
+          : genericCallbackFailureMessage;
     }
-    return {
-      status: "failed",
-      message: genericCallbackFailureMessage,
-    };
+
+    const operationalOutcome: OperationalOutcomeCode =
+      outcomeCode === "receiver_rejected"
+        ? "persistence_rejected"
+        : outcomeCode === "delivery_unknown"
+          ? "persistence_unknown"
+          : outcomeCode === "finalization_failed"
+            ? "finalization_failed"
+            : outcomeCode === "authorization_revoked"
+              ? "authorization_revoked"
+              : "internal_error";
+    emitOperationalEvent("oauth_callback_failed", operationalOutcome);
+
+    if (persistenceContext) {
+      try {
+        await finalizeConnectSessionPersistenceOutcome({
+          ...persistenceContext,
+          provider: "google",
+          status: terminalStatus,
+          outcomeCode,
+          now,
+        });
+      } catch {
+        emitOperationalEvent("oauth_outcome_finalize_unavailable", "dependency_unavailable");
+      }
+    }
+
+    return { status: "failed", message };
   }
 }
