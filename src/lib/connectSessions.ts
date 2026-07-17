@@ -38,6 +38,7 @@ export type ConnectSessionRecord = {
   expiresAt: string;
   claimId?: string;
   claimedAt?: string;
+  deliveryStartedAt?: string;
   usedAt?: string;
   connectedEmail?: string;
   outcomeCode?: ConnectSessionOutcomeCode;
@@ -62,6 +63,16 @@ export type CompleteConnectSessionPersistenceClaimOptions = {
   expectedTokenHash: string;
   claimId: string;
   connectedEmail?: string;
+  now: Date;
+};
+
+export type MarkConnectSessionPersistenceDeliveryStartedOptions = Omit<
+  CompleteConnectSessionPersistenceClaimOptions,
+  "connectedEmail"
+>;
+
+export type RecoverStaleConnectSessionPersistenceClaimOptions = {
+  sessionId: string;
   now: Date;
 };
 
@@ -96,6 +107,12 @@ export type ConnectSessionStore = {
   }): Promise<ConnectSessionRecord | null>;
   claimConnectSessionForPersistence?(
     options: ClaimConnectSessionForPersistenceOptions,
+  ): Promise<ConnectSessionRecord | null>;
+  markConnectSessionPersistenceDeliveryStarted?(
+    options: MarkConnectSessionPersistenceDeliveryStartedOptions,
+  ): Promise<ConnectSessionRecord | null>;
+  recoverStaleConnectSessionPersistenceClaim?(
+    options: RecoverStaleConnectSessionPersistenceClaimOptions,
   ): Promise<ConnectSessionRecord | null>;
   completeConnectSessionPersistenceClaim?(
     options: CompleteConnectSessionPersistenceClaimOptions,
@@ -166,6 +183,7 @@ export type RegisterAgentRuntimeOptions = {
 
 const defaultSessionTtlSeconds = 30 * 60;
 const connectedRecordTtlSeconds = 24 * 60 * 60;
+const connectSessionClaimLeaseMilliseconds = 5 * 60 * 1000;
 const tokenPrefix = "ecs_";
 const sessionPrefix = "ocs_";
 // Namespace v1 is centralized here because this control-plane data is new and has no live migration contract yet.
@@ -349,6 +367,76 @@ redis.call("SET", KEYS[2], encoded, "PX", ttl)
 return encoded
 `;
 
+const atomicConnectSessionDeliveryStartedScript = `
+local agentRaw = redis.call("GET", KEYS[1])
+local sessionRaw = redis.call("GET", KEYS[2])
+local tokenSessionId = redis.call("GET", KEYS[3])
+if not agentRaw or not sessionRaw or not tokenSessionId then
+  return 0
+end
+local agent = cjson.decode(agentRaw)
+local session = cjson.decode(sessionRaw)
+local providerAllowed = false
+for _, provider in ipairs(agent.allowedProviders or {}) do
+  if provider == ARGV[5] then providerAllowed = true break end
+end
+if agent.status ~= "active"
+  or type(agent.registryEpoch) ~= "number"
+  or type(session.registryEpoch) ~= "number"
+  or session.registryEpoch ~= agent.registryEpoch
+  or tostring(agent.registryVersion or "") ~= ARGV[1]
+  or tostring(session.registryVersion or "") ~= ARGV[1]
+  or not providerAllowed
+  or tostring(session.id or "") ~= ARGV[6]
+  or tostring(session.runtimeId or "") ~= ARGV[4]
+  or tostring(session.provider or "") ~= ARGV[5]
+  or session.status ~= "processing"
+  or tostring(session.claimId or "") ~= ARGV[2]
+  or tostring(session.tokenHash or "") ~= ARGV[7]
+  or tokenSessionId ~= ARGV[6] then
+  return 0
+end
+local ttl = redis.call("PTTL", KEYS[2])
+if ttl <= 0 then return 0 end
+session.deliveryStartedAt = ARGV[3]
+local encoded = cjson.encode(session)
+redis.call("SET", KEYS[2], encoded, "PX", ttl)
+return encoded
+`;
+
+const atomicConnectSessionRecoverScript = `
+local sessionRaw = redis.call("GET", KEYS[1])
+if not sessionRaw then return false end
+local session = cjson.decode(sessionRaw)
+if session.status ~= "processing"
+  or tostring(session.id or "") ~= ARGV[1]
+  or tostring(session.tokenHash or "") ~= ARGV[2]
+  or tostring(session.claimId or "") ~= ARGV[3]
+  or tostring(session.claimedAt or "") ~= ARGV[4] then
+  return sessionRaw
+end
+if ARGV[8] == "1" and ARGV[4] > ARGV[5] then return sessionRaw end
+local ttl = redis.call("PTTL", KEYS[1])
+if ttl <= 0 then return false end
+local tokenSessionId = redis.call("GET", KEYS[2])
+if session.deliveryStartedAt or ARGV[8] ~= "1" or tokenSessionId ~= ARGV[1] then
+  session.status = "reconciliation_required"
+  session.outcomeCode = "delivery_unknown"
+  session.outcomeAt = ARGV[6]
+  local encoded = cjson.encode(session)
+  redis.call("SET", KEYS[1], encoded, "EX", ARGV[7])
+  redis.call("DEL", KEYS[2])
+  return encoded
+end
+session.status = "pending"
+session.claimId = nil
+session.claimedAt = nil
+session.deliveryStartedAt = nil
+local encoded = cjson.encode(session)
+redis.call("SET", KEYS[1], encoded, "PX", ttl)
+return encoded
+`;
+
 const atomicConnectSessionCompleteScript = `
 local agentRaw = redis.call("GET", KEYS[1])
 local sessionRaw = redis.call("GET", KEYS[2])
@@ -394,9 +482,10 @@ session.usedAt = ARGV[3]
 if ARGV[7] ~= "" then
   session.connectedEmail = ARGV[7]
 end
-redis.call("SET", KEYS[2], cjson.encode(session), "EX", ARGV[8])
+local encoded = cjson.encode(session)
+redis.call("SET", KEYS[2], encoded, "EX", ARGV[8])
 redis.call("DEL", KEYS[3])
-return 1
+return encoded
 `;
 
 const atomicConnectSessionOutcomeScript = `
@@ -427,9 +516,10 @@ end
 session.status = ARGV[7]
 session.outcomeCode = ARGV[8]
 session.outcomeAt = ARGV[9]
-redis.call("SET", KEYS[1], cjson.encode(session), "EX", ARGV[10])
+local encoded = cjson.encode(session)
+redis.call("SET", KEYS[1], encoded, "EX", ARGV[10])
 redis.call("DEL", KEYS[2])
-return 1
+return encoded
 `;
 
 export function createMemoryConnectSessionStore(): ConnectSessionStore & { dump(): Map<string, unknown> } {
@@ -612,6 +702,70 @@ export function createMemoryConnectSessionStore(): ConnectSessionStore & { dump(
         expiresAt: sessionRecord.expiresAt,
       });
       return claimed;
+    },
+    async markConnectSessionPersistenceDeliveryStarted(options) {
+      const agentRecord = values.get(agentRuntimeKey(options.runtimeId));
+      const sessionRecord = values.get(connectSessionKey(options.sessionId));
+      const tokenRecord = values.get(connectSessionTokenKey(options.expectedTokenHash));
+      if (
+        !agentRecord || isExpired(agentRecord) ||
+        !sessionRecord || isExpired(sessionRecord) ||
+        !tokenRecord || isExpired(tokenRecord)
+      ) return null;
+      const agent = agentRecord.value as RuntimeRegistryEntry;
+      const session = sessionRecord.value as ConnectSessionRecord;
+      if (
+        agent.status !== "active" ||
+        session.registryEpoch !== agent.registryEpoch ||
+        agent.registryVersion !== options.expectedAgentRegistryVersion ||
+        session.registryVersion !== options.expectedAgentRegistryVersion ||
+        !agent.allowedProviders.includes(options.provider) ||
+        session.id !== options.sessionId ||
+        session.runtimeId !== options.runtimeId ||
+        session.provider !== options.provider ||
+        session.status !== "processing" ||
+        session.claimId !== options.claimId ||
+        session.tokenHash !== options.expectedTokenHash ||
+        tokenRecord.value !== options.sessionId ||
+        isSessionExpired(session, options.now)
+      ) return null;
+      const marked = { ...session, deliveryStartedAt: options.now.toISOString() };
+      values.set(connectSessionKey(options.sessionId), { value: marked, expiresAt: sessionRecord.expiresAt });
+      return marked;
+    },
+    async recoverStaleConnectSessionPersistenceClaim(options) {
+      const sessionRecord = values.get(connectSessionKey(options.sessionId));
+      if (!sessionRecord || isExpired(sessionRecord)) return null;
+      const session = sessionRecord.value as ConnectSessionRecord;
+      if (session.status !== "processing") return session;
+      const claimedAt = Date.parse(session.claimedAt ?? "");
+      const claimedAtIsValid = Number.isFinite(claimedAt);
+      if (
+        claimedAtIsValid &&
+        claimedAt > options.now.getTime() - connectSessionClaimLeaseMilliseconds
+      ) return session;
+      const tokenKey = connectSessionTokenKey(session.tokenHash);
+      const tokenRecord = values.get(tokenKey);
+      const tokenIndexIsValid =
+        Boolean(tokenRecord) && !isExpired(tokenRecord!) && tokenRecord!.value === session.id;
+      if (!claimedAtIsValid || session.deliveryStartedAt || !tokenIndexIsValid) {
+        const quarantined: ConnectSessionRecord = {
+          ...session,
+          status: "reconciliation_required",
+          outcomeCode: "delivery_unknown",
+          outcomeAt: options.now.toISOString(),
+        };
+        values.set(connectSessionKey(options.sessionId), {
+          value: quarantined,
+          expiresAt: Date.now() + connectedRecordTtlSeconds * 1000,
+        });
+        values.delete(tokenKey);
+        return quarantined;
+      }
+      const { claimId: _claimId, claimedAt: _claimedAt, deliveryStartedAt: _deliveryStartedAt, ...pending } = session;
+      const recovered: ConnectSessionRecord = { ...pending, status: "pending" };
+      values.set(connectSessionKey(options.sessionId), { value: recovered, expiresAt: sessionRecord.expiresAt });
+      return recovered;
     },
     async completeConnectSessionPersistenceClaim(options) {
       const agentRecord = values.get(agentRuntimeKey(options.runtimeId));
@@ -849,6 +1003,46 @@ export function createVercelKvConnectSessionStore(kv: VercelKvClient): ConnectSe
       }
       return parseStoredJson<ConnectSessionRecord>(claimed);
     },
+    async markConnectSessionPersistenceDeliveryStarted(options) {
+      const marked = await kv.eval(
+        atomicConnectSessionDeliveryStartedScript,
+        [
+          agentRuntimeKey(options.runtimeId),
+          connectSessionKey(options.sessionId),
+          connectSessionTokenKey(options.expectedTokenHash),
+        ],
+        [
+          options.expectedAgentRegistryVersion,
+          options.claimId,
+          options.now.toISOString(),
+          options.runtimeId,
+          options.provider,
+          options.sessionId,
+          options.expectedTokenHash,
+        ],
+      );
+      return marked ? parseStoredJson<ConnectSessionRecord>(marked) : null;
+    },
+    async recoverStaleConnectSessionPersistenceClaim(options) {
+      const existing = await kv.get<ConnectSessionRecord>(connectSessionKey(options.sessionId));
+      if (!existing || existing.status !== "processing") return existing;
+      const claimedAt = Date.parse(existing.claimedAt ?? "");
+      const recovered = await kv.eval(
+        atomicConnectSessionRecoverScript,
+        [connectSessionKey(options.sessionId), connectSessionTokenKey(existing.tokenHash)],
+        [
+          options.sessionId,
+          existing.tokenHash,
+          existing.claimId ?? "",
+          existing.claimedAt ?? "",
+          new Date(options.now.getTime() - connectSessionClaimLeaseMilliseconds).toISOString(),
+          options.now.toISOString(),
+          String(connectedRecordTtlSeconds),
+          Number.isFinite(claimedAt) ? "1" : "0",
+        ],
+      );
+      return recovered ? parseStoredJson<ConnectSessionRecord>(recovered) : null;
+    },
     async completeConnectSessionPersistenceClaim(options) {
       const connected = await kv.eval(
         atomicConnectSessionCompleteScript,
@@ -869,10 +1063,10 @@ export function createVercelKvConnectSessionStore(kv: VercelKvClient): ConnectSe
           options.expectedTokenHash,
         ],
       );
-      if (Number(connected) !== 1) {
+      if (!connected) {
         return null;
       }
-      return kv.get<ConnectSessionRecord>(connectSessionKey(options.sessionId));
+      return parseStoredJson<ConnectSessionRecord>(connected);
     },
     async finalizeConnectSessionPersistenceOutcome(options) {
       const finalized = await kv.eval(
@@ -894,10 +1088,10 @@ export function createVercelKvConnectSessionStore(kv: VercelKvClient): ConnectSe
           String(connectedRecordTtlSeconds),
         ],
       );
-      if (Number(finalized) !== 1) {
+      if (!finalized) {
         return null;
       }
-      return kv.get<ConnectSessionRecord>(connectSessionKey(options.sessionId));
+      return parseStoredJson<ConnectSessionRecord>(finalized);
     },
   };
 }
@@ -1180,6 +1374,26 @@ export async function completeConnectSessionPersistenceClaim({
     throw new Error("Connect-session store does not support atomic callback completion");
   }
   return store.completeConnectSessionPersistenceClaim(options);
+}
+
+export async function markConnectSessionPersistenceDeliveryStarted({
+  store,
+  ...options
+}: { store: ConnectSessionStore } & MarkConnectSessionPersistenceDeliveryStartedOptions) {
+  if (!store.markConnectSessionPersistenceDeliveryStarted) {
+    throw new Error("Connect-session store does not support atomic delivery markers");
+  }
+  return store.markConnectSessionPersistenceDeliveryStarted(options);
+}
+
+export async function recoverStaleConnectSessionPersistenceClaim({
+  store,
+  ...options
+}: { store: ConnectSessionStore } & RecoverStaleConnectSessionPersistenceClaimOptions) {
+  if (!store.recoverStaleConnectSessionPersistenceClaim) {
+    throw new Error("Connect-session store does not support atomic claim recovery");
+  }
+  return store.recoverStaleConnectSessionPersistenceClaim(options);
 }
 
 export async function finalizeConnectSessionPersistenceOutcome({

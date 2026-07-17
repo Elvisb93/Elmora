@@ -34,6 +34,13 @@ async function signedIdToken(payload: Record<string, unknown> = {}) {
   return (await oidcContextPromise).signIdToken(payload);
 }
 
+function tokenReceiverAcknowledgement() {
+  return new Response(
+    JSON.stringify({ runtimeId: "test-agent-2", registryEpoch: 41, written: true }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
 const callbackFixtureNow = new Date("2026-07-07T12:00:00.000Z");
 
 async function registerCallbackFixture(store: ReturnType<typeof createMemoryConnectSessionStore>) {
@@ -100,7 +107,7 @@ describe("Google OAuth callback OIDC enforcement", () => {
         );
       }
       receiverHandoffs += 1;
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return tokenReceiverAcknowledgement();
     };
 
     const result = await handleGoogleOAuthCallback({
@@ -284,6 +291,7 @@ describe("Google OAuth callback connect-session handling", () => {
     });
     const persistedBodies: unknown[] = [];
     const sessionStatusesWhenPersisted: string[] = [];
+    const deliveryMarkersWhenPersisted: Array<string | undefined> = [];
     const externalCallOrder: string[] = [];
     const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
       const urlString = url.toString();
@@ -308,11 +316,13 @@ describe("Google OAuth callback connect-session handling", () => {
       }
       if (urlString === env.ELMORA_TOKEN_WEBHOOK_URL) {
         externalCallOrder.push("receiver-handoff");
-        sessionStatusesWhenPersisted.push(
-          (await store.get<{ status: string }>(connectSessionKey(created.session.id)))?.status ?? "missing",
+        const persistenceSession = await store.get<{ status: string; deliveryStartedAt?: string }>(
+          connectSessionKey(created.session.id),
         );
+        sessionStatusesWhenPersisted.push(persistenceSession?.status ?? "missing");
+        deliveryMarkersWhenPersisted.push(persistenceSession?.deliveryStartedAt);
         persistedBodies.push(JSON.parse(String(init?.body)));
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        return tokenReceiverAcknowledgement();
       }
       throw new Error(`Unexpected fetch ${urlString}`);
     };
@@ -333,6 +343,7 @@ describe("Google OAuth callback connect-session handling", () => {
     assert.equal(result.storage, "stored");
     assert.deepEqual(externalCallOrder, ["google-exchange", "receiver-handoff"]);
     assert.deepEqual(sessionStatusesWhenPersisted, ["processing"]);
+    assert.deepEqual(deliveryMarkersWhenPersisted, ["2026-07-07T12:02:00.000Z"]);
     assert.equal(persistedBodies.length, 1);
     assert.deepEqual(persistedBodies[0], {
       protocolVersion: "1",
@@ -480,7 +491,7 @@ describe("Google OAuth callback connect-session handling", () => {
         }
         if (url.toString() === env.ELMORA_TOKEN_WEBHOOK_URL) {
           receiverHandoffs += 1;
-          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          return tokenReceiverAcknowledgement();
         }
         throw new Error(`Unexpected fetch ${url.toString()}`);
       };
@@ -618,7 +629,7 @@ describe("Google OAuth callback connect-session handling", () => {
       }
       if (urlString === env.ELMORA_TOKEN_WEBHOOK_URL) {
         persistedTokens += 1;
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        return tokenReceiverAcknowledgement();
       }
       throw new Error(`Unexpected fetch ${urlString}`);
     };
@@ -691,7 +702,7 @@ describe("Google OAuth callback connect-session handling", () => {
         );
       }
       if (url.toString() === env.ELMORA_TOKEN_WEBHOOK_URL) {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        return tokenReceiverAcknowledgement();
       }
       throw new Error("Unexpected fetch");
     };

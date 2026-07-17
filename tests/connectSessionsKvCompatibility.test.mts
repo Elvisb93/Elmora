@@ -163,14 +163,36 @@ describe("@vercel/kv Lua adapter compatibility", () => {
       tokenHash,
     ]);
 
-    const connected = {
+    const marked = {
       ...claimed,
+      deliveryStartedAt: "2026-07-07T12:01:30.000Z",
+    };
+    client.evalResults.push(JSON.stringify(marked));
+    assert.deepEqual(
+      await store.markConnectSessionPersistenceDeliveryStarted?.({
+        sessionId: session.id,
+        runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion: registryVersion,
+        expectedTokenHash: tokenHash,
+        claimId: claimed.claimId,
+        now: new Date(marked.deliveryStartedAt),
+      }),
+      marked,
+    );
+    assert.deepEqual(client.calls[4]?.[1], [
+      agentRuntimeKey(runtimeId),
+      connectSessionKey(session.id),
+      connectSessionTokenKey(tokenHash),
+    ]);
+
+    const connected = {
+      ...marked,
       status: "connected" as const,
       usedAt: "2026-07-07T12:02:00.000Z",
       connectedEmail: "owner@example.com",
     };
-    client.values.set(connectSessionKey(session.id), connected);
-    client.evalResults.push(1);
+    client.evalResults.push(JSON.stringify(connected));
     assert.deepEqual(
       await store.completeConnectSessionPersistenceClaim?.({
         sessionId: session.id,
@@ -184,12 +206,12 @@ describe("@vercel/kv Lua adapter compatibility", () => {
       }),
       connected,
     );
-    assert.deepEqual(client.calls[4]?.[1], [
+    assert.deepEqual(client.calls[5]?.[1], [
       agentRuntimeKey(runtimeId),
       connectSessionKey(session.id),
       connectSessionTokenKey(tokenHash),
     ]);
-    assert.deepEqual(client.calls[4]?.[2], [
+    assert.deepEqual(client.calls[5]?.[2], [
       registryVersion,
       claimed.claimId,
       connected.usedAt,
@@ -207,8 +229,7 @@ describe("@vercel/kv Lua adapter compatibility", () => {
       outcomeCode: "delivery_unknown" as const,
       outcomeAt: "2026-07-07T12:03:00.000Z",
     };
-    client.values.set(connectSessionKey(session.id), reconciled);
-    client.evalResults.push(1);
+    client.evalResults.push(JSON.stringify(reconciled));
     assert.deepEqual(
       await store.finalizeConnectSessionPersistenceOutcome?.({
         sessionId: session.id,
@@ -223,11 +244,11 @@ describe("@vercel/kv Lua adapter compatibility", () => {
       }),
       reconciled,
     );
-    assert.deepEqual(client.calls[5]?.[1], [
+    assert.deepEqual(client.calls[6]?.[1], [
       connectSessionKey(session.id),
       connectSessionTokenKey(tokenHash),
     ]);
-    assert.deepEqual(client.calls[5]?.[2], [
+    assert.deepEqual(client.calls[6]?.[2], [
       registryVersion,
       claimed.claimId,
       runtimeId,
@@ -238,6 +259,22 @@ describe("@vercel/kv Lua adapter compatibility", () => {
       "delivery_unknown",
       reconciled.outcomeAt,
       "86400",
+    ]);
+
+    const { claimId: _claimId, claimedAt: _claimedAt, ...pendingClaim } = claimed;
+    const recovered = { ...pendingClaim, status: "pending" as const };
+    client.values.set(connectSessionKey(session.id), claimed);
+    client.evalResults.push(JSON.stringify(recovered));
+    assert.deepEqual(
+      await store.recoverStaleConnectSessionPersistenceClaim?.({
+        sessionId: session.id,
+        now: new Date("2026-07-07T12:07:00.000Z"),
+      }),
+      recovered,
+    );
+    assert.deepEqual(client.calls[7]?.[1], [
+      connectSessionKey(session.id),
+      connectSessionTokenKey(tokenHash),
     ]);
 
     for (const [script, keys, args] of client.calls) {

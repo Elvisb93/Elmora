@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { NextRequest } from "next/server";
 import {
   handleReadinessRequest,
+  probeTokenReceiverHealth,
 } from "../src/app/api/readiness/route.ts";
 import {
   createMemoryConnectSessionStore,
@@ -87,6 +88,27 @@ async function withAdminSecret<T>(callback: () => Promise<T>) {
 }
 
 describe("authenticated readiness route", () => {
+  it("requires the exact bounded receiver health contract", async () => {
+    const webhookUrl = new URL(readyEnv.ELMORA_TOKEN_WEBHOOK_URL);
+    const valid = await probeTokenReceiverHealth(webhookUrl, async (input, init) => {
+      assert.equal(String(input), "https://receiver.example/healthz");
+      assert.equal(init?.redirect, "error");
+      return Response.json({ status: "ok", protocolVersion: "1" });
+    });
+    assert.equal(valid, true);
+
+    const invalidResponses = [
+      () => new Response("<html>ok</html>", { status: 200, headers: { "content-type": "text/html" } }),
+      () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
+      () => Response.json({ status: "ok", protocolVersion: "2" }),
+      () => Response.json({ status: "degraded", protocolVersion: "1" }),
+      () => Response.json({ status: "ok", protocolVersion: "1", padding: "x".repeat(20_000) }),
+    ];
+    for (const response of invalidResponses) {
+      assert.equal(await probeTokenReceiverHealth(webhookUrl, async () => response()), false);
+    }
+  });
+
   it("authenticates before store access and returns a no-store ready response", async () => {
     let storeCalls = 0;
     const unauthorized = await handleReadinessRequest(

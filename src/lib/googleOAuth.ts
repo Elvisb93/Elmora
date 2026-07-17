@@ -68,6 +68,51 @@ export class TokenStorageDeliveryError extends Error {
 }
 
 const tokenStorageTimeoutMilliseconds = 10_000;
+const tokenStorageAcknowledgementMaxBytes = 4_096;
+
+async function readBoundedJsonResponse(response: Response, maximumBytes: number): Promise<unknown> {
+  if (!response.body) {
+    throw new Error("Missing response body");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > maximumBytes) {
+        await reader.cancel();
+        throw new Error("Response body too large");
+      }
+      chunks.push(value);
+    }
+    const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function isExpectedTokenStorageAcknowledgement(
+  value: unknown,
+  runtimeId: string,
+  registryEpoch: number,
+) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const acknowledgement = value as Record<string, unknown>;
+  return (
+    Object.keys(acknowledgement).length === 3 &&
+    acknowledgement.runtimeId === runtimeId &&
+    acknowledgement.registryEpoch === registryEpoch &&
+    acknowledgement.written === true
+  );
+}
 
 type GoogleOAuthErrorResponse = {
   error?: string;
@@ -233,6 +278,7 @@ function parseSecureWebhookUrl(value: string): URL | null {
       !url.hostname ||
       url.username ||
       url.password ||
+      url.pathname !== "/v1/oauth/google/token" ||
       url.search ||
       url.hash
     ) {
@@ -300,8 +346,9 @@ export async function persistGoogleOAuthToken(
     return { status: "skipped", reason: "No token storage webhook configured" };
   }
   if (
+    typeof registryEpoch !== "number" ||
     !Number.isSafeInteger(registryEpoch) ||
-    (registryEpoch ?? 0) < 1 ||
+    registryEpoch < 1 ||
     !Number.isFinite(now.getTime()) ||
     nonceBytes.length < 16 ||
     nonceBytes.length > 32
@@ -351,6 +398,7 @@ export async function persistGoogleOAuthToken(
         "X-Elmora-Signature": signature,
       },
       body,
+      redirect: "error",
       signal: AbortSignal.timeout(tokenStorageTimeoutMilliseconds),
     });
   } catch {
@@ -359,6 +407,22 @@ export async function persistGoogleOAuthToken(
 
   if (!response.ok) {
     throw new TokenStorageDeliveryError("rejected");
+  }
+
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new TokenStorageDeliveryError("unknown");
+  }
+  try {
+    const acknowledgement = await readBoundedJsonResponse(response, tokenStorageAcknowledgementMaxBytes);
+    if (!isExpectedTokenStorageAcknowledgement(acknowledgement, clientRuntimeId, registryEpoch)) {
+      throw new TokenStorageDeliveryError("unknown");
+    }
+  } catch (error) {
+    if (error instanceof TokenStorageDeliveryError) {
+      throw error;
+    }
+    throw new TokenStorageDeliveryError("unknown");
   }
 
   return { status: "stored" };

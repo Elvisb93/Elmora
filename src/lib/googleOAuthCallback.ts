@@ -18,6 +18,8 @@ import {
   getAgentRuntime,
   getConnectSessionById,
   getVercelKvConnectSessionStore,
+  markConnectSessionPersistenceDeliveryStarted,
+  recoverStaleConnectSessionPersistenceClaim,
   type ConnectSessionOutcomeCode,
   type ConnectSessionStore,
 } from "./connectSessions";
@@ -277,6 +279,15 @@ export async function handleGoogleOAuthCallback({
 
     if (verifiedState.connectSessionId) {
       resolvedStore = resolvedStore ?? (await getVercelKvConnectSessionStore());
+      const recoveredSession = await recoverStaleConnectSessionPersistenceClaim({
+        store: resolvedStore,
+        sessionId: verifiedState.connectSessionId,
+        now,
+      });
+      if (recoveredSession?.status === "reconciliation_required") {
+        knownFailureCode = "delivery_unknown";
+        throw new Error("Connect session requires token-delivery reconciliation");
+      }
       const session = await getConnectSessionById({
         store: resolvedStore,
         sessionId: verifiedState.connectSessionId,
@@ -418,6 +429,20 @@ export async function handleGoogleOAuthCallback({
         throw new Error(
           "Connect session agent was revoked before token persistence was authorized",
         );
+      }
+      const deliveryMarked = await markConnectSessionPersistenceDeliveryStarted({
+        store: resolvedStore,
+        sessionId: connectSessionId,
+        runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion,
+        expectedTokenHash: connectSessionTokenHash,
+        claimId: callbackClaimId,
+        now,
+      });
+      if (!deliveryMarked) {
+        knownFailureCode = "authorization_revoked";
+        throw new Error("Connect session authorization changed before token delivery");
       }
     }
 

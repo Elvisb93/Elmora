@@ -185,6 +185,7 @@ describe("Google OAuth helpers", () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "https://runtime.example.com/v1/oauth/google/token");
     assert.equal(calls[0].init.method, "POST");
+    assert.equal(calls[0].init.redirect, "error");
     const headers = calls[0].init.headers as Record<string, string>;
     assert.equal(headers["content-type"], "application/json");
     assert.equal(headers["X-Elmora-Version"], "1");
@@ -226,6 +227,58 @@ describe("Google OAuth helpers", () => {
     assert.equal("authorization" in headers, false);
   });
 
+  it("requires a bounded matching JSON acknowledgement before reporting token persistence", async () => {
+    const responses = [
+      () => new Response(null, { status: 204 }),
+      () => new Response("<html>ok</html>", { status: 200, headers: { "content-type": "text/html" } }),
+      () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
+      () =>
+        new Response(JSON.stringify({ runtimeId: "other-runtime", registryEpoch: 7, written: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      () =>
+        new Response(JSON.stringify({ runtimeId: "elmora-demo", registryEpoch: 8, written: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      () =>
+        new Response(JSON.stringify({ runtimeId: "elmora-demo", registryEpoch: 7, written: false }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      () =>
+        new Response(JSON.stringify({ runtimeId: "elmora-demo", registryEpoch: 7, written: true, padding: "x".repeat(20_000) }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    ];
+
+    for (const response of responses) {
+      await assert.rejects(
+        () =>
+          persistGoogleOAuthToken(
+            {
+              clientRuntimeId: "elmora-demo",
+              registryEpoch: 7,
+              storageWebhookUrl: "https://runtime.example.com/v1/oauth/google/token",
+              storageWebhookKeyId: "primary-v1",
+              storageWebhookSecret: "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
+              tokenFile: {
+                type: "authorized_user",
+                client_id: "client-id.apps.googleusercontent.com",
+                client_secret: "server-only-test-secret",
+                refresh_token: "test-refresh-token",
+                token_uri: "https://oauth2.googleapis.com/token",
+              },
+            },
+            async () => response(),
+          ),
+        (error: unknown) => error instanceof TokenStorageDeliveryError && error.outcome === "unknown",
+      );
+    }
+  });
+
   it("retains the legacy skipped result only when no storage webhook URL is configured", async () => {
     let fetchCalls = 0;
     const result = await persistGoogleOAuthToken(
@@ -258,7 +311,7 @@ describe("Google OAuth helpers", () => {
             {
               clientRuntimeId: "elmora-demo",
               registryEpoch: 7,
-              storageWebhookUrl: "https://runtime.example.com/oauth/google/token",
+              storageWebhookUrl: "https://runtime.example.com/v1/oauth/google/token",
               storageWebhookKeyId: "primary-v1",
               storageWebhookSecret,
               tokenFile: {
@@ -286,6 +339,9 @@ describe("Google OAuth helpers", () => {
       "https://user:password@runtime.example.com/token",
       "https://runtime.example.com/token?bearer=secret",
       "https://runtime.example.com/token#fragment",
+      "https://runtime.example.com/oauth/google/token",
+      "https://runtime.example.com/v1/oauth/google/token/",
+      "https://runtime.example.com/v1/oauth/google/not-token",
       "not-a-url",
     ]) {
       let fetchCalls = 0;
@@ -346,7 +402,7 @@ describe("Google OAuth helpers", () => {
             {
               ...input,
               registryEpoch: 7,
-              storageWebhookUrl: "https://runtime.example.com/oauth/google/token",
+              storageWebhookUrl: "https://runtime.example.com/v1/oauth/google/token",
               storageWebhookKeyId: "primary-v1",
               storageWebhookSecret: "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
             },
@@ -368,7 +424,7 @@ describe("Google OAuth helpers", () => {
           {
             clientRuntimeId: "elmora-demo",
             registryEpoch: 7,
-            storageWebhookUrl: "https://runtime.example.com/oauth/google/token",
+            storageWebhookUrl: "https://runtime.example.com/v1/oauth/google/token",
             storageWebhookKeyId: "primary-v1",
             storageWebhookSecret: "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
             tokenFile: {
@@ -395,7 +451,7 @@ describe("Google OAuth helpers", () => {
           {
             clientRuntimeId: "elmora-demo",
             registryEpoch: 7,
-            storageWebhookUrl: "https://runtime.example.com/oauth/google/token",
+            storageWebhookUrl: "https://runtime.example.com/v1/oauth/google/token",
             storageWebhookKeyId: "primary-v1",
             storageWebhookSecret: "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
             tokenFile: {

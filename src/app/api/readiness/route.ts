@@ -15,6 +15,7 @@ type ConnectSessionStoreFactory = () => Promise<ConnectSessionStore>;
 type TokenReceiverProbe = (webhookUrl: URL) => Promise<boolean>;
 
 const tokenReceiverProbeTimeoutMilliseconds = 5_000;
+const tokenReceiverProbeResponseMaxBytes = 4_096;
 
 function isSafeConfigurationString(
   value: string | undefined,
@@ -51,19 +52,60 @@ function assertReadinessConfiguration(env: Record<string, string | undefined>) {
   return webhookUrl;
 }
 
-async function probeTokenReceiverHealth(webhookUrl: URL): Promise<boolean> {
+async function readBoundedHealthResponse(response: Response): Promise<unknown> {
+  if (!response.body) {
+    throw new Error("Missing health response body");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > tokenReceiverProbeResponseMaxBytes) {
+        await reader.cancel();
+        throw new Error("Health response body too large");
+      }
+      chunks.push(value);
+    }
+    const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function probeTokenReceiverHealth(
+  webhookUrl: URL,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
   const healthUrl = new URL(webhookUrl);
   healthUrl.pathname = "/healthz";
   healthUrl.search = "";
   healthUrl.hash = "";
   try {
-    const response = await fetch(healthUrl, {
+    const response = await fetchImpl(healthUrl, {
       method: "GET",
       cache: "no-store",
       redirect: "error",
       signal: AbortSignal.timeout(tokenReceiverProbeTimeoutMilliseconds),
     });
-    return response.ok;
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+    if (!response.ok || contentType !== "application/json") {
+      return false;
+    }
+    const body = await readBoundedHealthResponse(response);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return false;
+    }
+    const health = body as Record<string, unknown>;
+    return (
+      Object.keys(health).length === 2 &&
+      health.status === "ok" &&
+      health.protocolVersion === "1"
+    );
   } catch {
     return false;
   }

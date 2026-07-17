@@ -17,6 +17,8 @@ import {
   getAgentRuntime,
   getConnectSessionByToken,
   hashConnectToken,
+  markConnectSessionPersistenceDeliveryStarted,
+  recoverStaleConnectSessionPersistenceClaim,
   registerAgentRuntime,
   resolveGoogleConnectSessionViewModel,
   revokeAgentRuntime,
@@ -882,6 +884,101 @@ describe("KV-backed one-time OAuth connect sessions", () => {
         rawToken: created.rawToken,
         now: new Date("2026-07-07T12:04:00.000Z"),
       }),
+      null,
+    );
+  });
+
+  it("recovers stale pre-delivery claims but quarantines claims that may have delivered", async () => {
+    const store = createMemoryConnectSessionStore();
+    const createdAt = new Date("2026-07-07T12:00:00.000Z");
+    const { agent } = await registerAgentRuntime({
+      store,
+      registryEpoch: 41,
+      runtimeId: "lease-recovery-agent",
+      agentName: "Lease Recovery Worker",
+      clientName: "Lease Recovery Client",
+      rawConnectSecret: "lease-recovery-agent-connect-secret",
+      now: createdAt,
+    });
+
+    const createAndClaim = async (sessionId: string, rawToken: string, claimId: string) => {
+      const created = await createConnectSession({
+        store,
+        provider: "google",
+        runtimeId: agent.runtimeId,
+        expectedAgentRegistryEpoch: agent.registryEpoch,
+        expectedAgentRegistryVersion: agent.registryVersion,
+        agentName: agent.agentName,
+        clientName: agent.clientName,
+        rawToken,
+        sessionId,
+        now: createdAt,
+      });
+      const claimed = await claimConnectSessionForPersistence({
+        store,
+        sessionId,
+        runtimeId: agent.runtimeId,
+        provider: "google",
+        expectedAgentRegistryVersion: agent.registryVersion,
+        expectedTokenHash: created.session.tokenHash,
+        claimId,
+        now: new Date("2026-07-07T12:01:00.000Z"),
+      });
+      assert.equal(claimed?.status, "processing");
+      return created;
+    };
+
+    const preDelivery = await createAndClaim(
+      "ocs_pre_delivery_lease",
+      "cs_pre_delivery_lease",
+      "occ_pre_delivery_lease",
+    );
+    const stillClaimed = await recoverStaleConnectSessionPersistenceClaim({
+      store,
+      sessionId: preDelivery.session.id,
+      now: new Date("2026-07-07T12:04:00.000Z"),
+    });
+    assert.equal(stillClaimed?.status, "processing");
+
+    const recovered = await recoverStaleConnectSessionPersistenceClaim({
+      store,
+      sessionId: preDelivery.session.id,
+      now: new Date("2026-07-07T12:07:00.000Z"),
+    });
+    assert.equal(recovered?.status, "pending");
+    assert.equal(recovered?.claimId, undefined);
+    assert.equal(recovered?.claimedAt, undefined);
+    assert.equal(
+      await store.get(connectSessionTokenKey(preDelivery.session.tokenHash)),
+      preDelivery.session.id,
+    );
+
+    const possiblyDelivered = await createAndClaim(
+      "ocs_delivery_started_lease",
+      "cs_delivery_started_lease",
+      "occ_delivery_started_lease",
+    );
+    const marked = await markConnectSessionPersistenceDeliveryStarted({
+      store,
+      sessionId: possiblyDelivered.session.id,
+      runtimeId: agent.runtimeId,
+      provider: "google",
+      expectedAgentRegistryVersion: agent.registryVersion,
+      expectedTokenHash: possiblyDelivered.session.tokenHash,
+      claimId: "occ_delivery_started_lease",
+      now: new Date("2026-07-07T12:02:00.000Z"),
+    });
+    assert.equal(marked?.deliveryStartedAt, "2026-07-07T12:02:00.000Z");
+
+    const quarantined = await recoverStaleConnectSessionPersistenceClaim({
+      store,
+      sessionId: possiblyDelivered.session.id,
+      now: new Date("2026-07-07T12:08:00.000Z"),
+    });
+    assert.equal(quarantined?.status, "reconciliation_required");
+    assert.equal(quarantined?.outcomeCode, "delivery_unknown");
+    assert.equal(
+      await store.get(connectSessionTokenKey(possiblyDelivered.session.tokenHash)),
       null,
     );
   });
